@@ -1,0 +1,47 @@
+# ======================
+# Python
+# ======================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+
+# ======================
+# Virtual Environment
+# ======================
+venv/
+.env
+.env.*
+
+# ======================
+# OS / Editor junk
+# ======================
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# PyCharm
+.idea/
+
+# ======================
+# Logs
+# ======================
+*.log
+
+# ======================
+# Test / Cache
+# ======================
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ======================
+# Runtime artifacts
+# ======================
+*.sqlite3
