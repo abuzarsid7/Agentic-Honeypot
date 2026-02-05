@@ -12,7 +12,9 @@ def get_session(session_id, history):
                 "suspiciousKeywords": []
             },
             "messages": 0,
-            "completed": False
+            "completed": False,
+            "asked_about": set(),  # Track what we've already asked about
+            "response_count": {}   # Count how many times each response type used
         }
     return sessions[session_id]
 

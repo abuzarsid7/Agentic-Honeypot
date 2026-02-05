@@ -37,8 +37,16 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             reply = agent_reply(session_id, session, message["text"])
             update_session(session_id, message, reply)
             return {"status": "success", "reply": reply}
+        
+        # Even if not detected as scam, engage if conversation already started
+        if session["messages"] > 0:
+            # Conversation in progress - keep it going
+            reply = agent_reply(session_id, session, message["text"])
+            update_session(session_id, message, reply)
+            return {"status": "success", "reply": reply}
 
-        return {"status": "ignored", "reply": "Okay"}
+        # First message and not detected as scam - be neutral
+        return {"status": "success", "reply": "Okay, thank you."}
 
     except HTTPException:
         # Let FastAPI handle auth errors properly
