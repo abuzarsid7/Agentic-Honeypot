@@ -1,7 +1,9 @@
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from detector import detect_scam
 from agent import agent_reply
 from memory import get_session, update_session
+from normalizer import get_normalization_report
 import os
 from dotenv import load_dotenv
 
@@ -10,6 +12,15 @@ load_dotenv()
 API_KEY = os.getenv("API_KEY")
 
 app = FastAPI()
+
+# CORS middleware for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://localhost:3000", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/")
@@ -58,6 +69,41 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             "status": "error",
             "reply": "Temporary issue, please retry"
         }
+
+
+@app.post("/debug/normalize")
+def debug_normalization(payload: dict, x_api_key: str = Header(None)):
+    """
+    🔍 DEBUG ENDPOINT: Show normalization pipeline stages
+    
+    Returns detailed report of how text transforms through 8 stages.
+    Useful for demo and debugging obfuscation attacks.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    text = payload.get("text", "")
+    if not text:
+        return {"status": "error", "message": "Text field required"}
+    
+    report = get_normalization_report(text)
+    
+    return {
+        "status": "success",
+        "input": text,
+        "stages": report,
+        "final": report["stage8_final"],
+        "transformations": {
+            "unicode_changed": report["original"] != report["stage1_unicode"],
+            "zero_width_removed": report["stage1_unicode"] != report["stage2_zero_width"],
+            "control_chars_removed": report["stage2_zero_width"] != report["stage3_control_chars"],
+            "homoglyphs_normalized": report["stage3_control_chars"] != report["stage4_homoglyphs"],
+            "leetspeak_converted": report["stage4_homoglyphs"] != report["stage5_leetspeak"],
+            "urls_deobfuscated": report["stage5_leetspeak"] != report["stage6_urls"],
+            "whitespace_normalized": report["stage6_urls"] != report["stage7_whitespace"],
+            "lowercased": report["stage7_whitespace"] != report["stage8_final"]
+        }
+    }
 
 
 if __name__ == "__main__":

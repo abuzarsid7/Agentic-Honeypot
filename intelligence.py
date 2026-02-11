@@ -1,36 +1,61 @@
 import re
 
+# ═══════════════════════════════════════════════════════════════
+# 🔥 IMPORT NORMALIZATION HELPERS
+# ═══════════════════════════════════════════════════════════════
+from normalizer import (
+    normalize_url_for_extraction,
+    normalize_unicode,
+    remove_zero_width,
+    normalize_whitespace
+)
+
 def extract_intel(session, text):
     """
-    Enhanced intelligence extraction with comprehensive pattern matching.
-    Automatically deduplicates entries.
-    """
-    text_l = text.lower()
+    🔥 ENHANCED: Smart normalization for extraction
     
-    # Extract UPI IDs (handle various formats)
-    upis = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text)
+    Intelligence extraction with comprehensive pattern matching.
+    Uses LIGHT normalization to preserve phone numbers and UPIs.
+    """
+    # ═══════════════════════════════════════════════════════════
+    # 🔥 CRITICAL: Use LIGHT normalization for extraction
+    # We want to remove invisible chars but preserve numbers!
+    # ═══════════════════════════════════════════════════════════
+    
+    # Light normalization: only remove invisible chars and normalize whitespace
+    text_clean = normalize_unicode(text)
+    text_clean = remove_zero_width(text_clean)
+    text_clean = normalize_whitespace(text_clean)
+    
+    # For keyword matching, use lowercase
+    text_lower = text_clean.lower()
+    
+    # Extract UPI IDs - use lightly normalized text
+    upis = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
     for upi in upis:
         if upi not in session["intel"]["upiIds"]:
             session["intel"]["upiIds"].append(upi)
     
-    # Extract phone numbers (multiple formats)
+    # Extract phone numbers (multiple formats) - PRESERVE ORIGINAL NUMBERS
     # +91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit numbers in context
-    phones = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text)
+    phones = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean)
     for phone in phones:
         cleaned_phone = phone.strip()
         if cleaned_phone and cleaned_phone not in session["intel"]["phoneNumbers"]:
             session["intel"]["phoneNumbers"].append(cleaned_phone)
     
-    # Extract URLs/links
-    links = re.findall(r"https?://\S+", text)
+    # Extract URLs/links - use lightly normalized text
+    links = re.findall(r"https?://\S+", text_clean)
     for link in links:
         # Clean up trailing punctuation
         link = link.rstrip('.,;:!?)')
-        if link not in session["intel"]["phishingLinks"]:
-            session["intel"]["phishingLinks"].append(link)
+        # Apply URL-specific normalization for deobfuscation
+        link_normalized = normalize_url_for_extraction(link)
+        if link_normalized not in session["intel"]["phishingLinks"]:
+            session["intel"]["phishingLinks"].append(link_normalized)
     
-    # Extract potential bank account numbers (8-16 digits)
-    accounts = re.findall(r"\b\d{8,16}\b", text)
+    # Extract potential bank account numbers (8-16 digits) - use lightly normalized text
+    accounts = re.findall(r"\b\d{8,16}\b", text_clean)
     for account in accounts:
         # Avoid phone numbers that might be caught here
         if len(account) != 10 and account not in session["intel"]["bankAccounts"]:
@@ -44,7 +69,7 @@ def extract_intel(session, text):
     ]
     
     for keyword in keywords:
-        if keyword in text_l and keyword not in session["intel"]["suspiciousKeywords"]:
+        if keyword in text_lower and keyword not in session["intel"]["suspiciousKeywords"]:
             session["intel"]["suspiciousKeywords"].append(keyword)
 
 def maybe_finish(session):

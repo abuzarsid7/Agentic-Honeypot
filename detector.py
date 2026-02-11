@@ -1,5 +1,10 @@
 import re
 
+# ═══════════════════════════════════════════════════════════════
+# 🔥 IMPORT NORMALIZATION MODULE
+# ═══════════════════════════════════════════════════════════════
+from normalizer import normalize_input, normalize_for_detection
+
 SCAM_KEYWORDS = [
     "account", "blocked", "verify", "urgent", "immediately",
     "upi", "bank", "suspended", "link", "click", "update",
@@ -12,13 +17,29 @@ SCAM_KEYWORDS = [
 
 def detect_scam(text, history):
     """
-    Enhanced scam detection with multiple signals.
+    🔥 ENHANCED: Now with normalization preprocessing
+    
+    Scam detection with multiple signals - defeats obfuscation attacks.
     Returns True if message appears suspicious.
     """
     if not text or len(text.strip()) < 3:
         return False
     
-    text_lower = text.lower()
+    # ═══════════════════════════════════════════════════════════
+    # 🔥 CRITICAL: Normalize input BEFORE detection
+    # This defeats: zero-width chars, homoglyphs, leetspeak, URL obfuscation
+    # ═══════════════════════════════════════════════════════════
+    text_normalized = normalize_for_detection(text)
+    text_lower = text_normalized  # Already lowercase from normalization
+    
+    # 📍 DEBUG: Print normalization results
+    if text != text_normalized:
+        print(f"\n{'━'*70}")
+        print(f"🔍 NORMALIZATION APPLIED:")
+        print(f"{'━'*70}")
+        print(f"📥 ORIGINAL:   {text!r}")
+        print(f"📤 NORMALIZED: {text_normalized!r}")
+        print(f"{'━'*70}\n")
     
     # Check 1: Keyword matching (more lenient)
     keyword_score = sum(1 for k in SCAM_KEYWORDS if k in text_lower)
