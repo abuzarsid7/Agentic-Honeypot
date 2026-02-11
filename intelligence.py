@@ -9,6 +9,7 @@ from normalizer import (
     remove_zero_width,
     normalize_whitespace
 )
+from telemetry import track_intelligence
 
 def extract_intel(session, text):
     """
@@ -32,20 +33,29 @@ def extract_intel(session, text):
     
     # Extract UPI IDs - use lightly normalized text
     upis = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
+    new_upis = 0
     for upi in upis:
         if upi not in session["intel"]["upiIds"]:
             session["intel"]["upiIds"].append(upi)
+            new_upis += 1
+    if new_upis > 0:
+        track_intelligence("upi", new_upis)
     
     # Extract phone numbers (multiple formats) - PRESERVE ORIGINAL NUMBERS
     # +91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit numbers in context
     phones = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean)
+    new_phones = 0
     for phone in phones:
         cleaned_phone = phone.strip()
         if cleaned_phone and cleaned_phone not in session["intel"]["phoneNumbers"]:
             session["intel"]["phoneNumbers"].append(cleaned_phone)
+            new_phones += 1
+    if new_phones > 0:
+        track_intelligence("phone", new_phones)
     
     # Extract URLs/links - use lightly normalized text
     links = re.findall(r"https?://\S+", text_clean)
+    new_urls = 0
     for link in links:
         # Clean up trailing punctuation
         link = link.rstrip('.,;:!?)')
@@ -53,13 +63,20 @@ def extract_intel(session, text):
         link_normalized = normalize_url_for_extraction(link)
         if link_normalized not in session["intel"]["phishingLinks"]:
             session["intel"]["phishingLinks"].append(link_normalized)
+            new_urls += 1
+    if new_urls > 0:
+        track_intelligence("url", new_urls)
     
     # Extract potential bank account numbers (8-16 digits) - use lightly normalized text
     accounts = re.findall(r"\b\d{8,16}\b", text_clean)
+    new_accounts = 0
     for account in accounts:
         # Avoid phone numbers that might be caught here
         if len(account) != 10 and account not in session["intel"]["bankAccounts"]:
             session["intel"]["bankAccounts"].append(account)
+            new_accounts += 1
+    if new_accounts > 0:
+        track_intelligence("account", new_accounts)
     
     # Track suspicious keywords (deduplicated)
     keywords = [

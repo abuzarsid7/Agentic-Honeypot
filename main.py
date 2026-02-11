@@ -4,6 +4,7 @@ from detector import detect_scam
 from agent import agent_reply
 from memory import get_session, update_session
 from normalizer import get_normalization_report
+from telemetry import track_request, track_detection, get_metrics
 import os
 from dotenv import load_dotenv
 
@@ -29,35 +30,57 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/metrics")
+def metrics_endpoint(x_api_key: str = Header(None)):
+    """
+    📊 METRICS ENDPOINT: Real-time telemetry and performance stats
+    
+    Returns comprehensive metrics about:
+    - API request statistics (latency, throughput, errors)
+    - Scam detection performance
+    - Intelligence extraction counts
+    - Session analytics
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return get_metrics()
+
+
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
     try:
-        # 🔐 API key validation
-        if x_api_key != API_KEY:
-            raise HTTPException(status_code=401, detail="Invalid API key")
+        # � Track request with automatic timing
+        with track_request():
+            # 🔐 API key validation
+            if x_api_key != API_KEY:
+                raise HTTPException(status_code=401, detail="Invalid API key")
 
-        session_id = payload["sessionId"]
-        message = payload["message"]
-        history = payload.get("conversationHistory", [])
+            session_id = payload["sessionId"]
+            message = payload["message"]
+            history = payload.get("conversationHistory", [])
 
-        session = get_session(session_id, history)
+            session = get_session(session_id, history)
 
-        scam_detected = detect_scam(message["text"], history)
+            scam_detected = detect_scam(message["text"], history)
+            
+            # 📊 Track detection result
+            track_detection(scam_detected)
 
-        if scam_detected:
-            reply = agent_reply(session_id, session, message["text"])
-            update_session(session_id, message, reply)
-            return {"status": "success", "reply": reply}
-        
-        # Even if not detected as scam, engage if conversation already started
-        if session["messages"] > 0:
-            # Conversation in progress - keep it going
-            reply = agent_reply(session_id, session, message["text"])
-            update_session(session_id, message, reply)
-            return {"status": "success", "reply": reply}
+            if scam_detected:
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                return {"status": "success", "reply": reply}
+            
+            # Even if not detected as scam, engage if conversation already started
+            if session["messages"] > 0:
+                # Conversation in progress - keep it going
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                return {"status": "success", "reply": reply}
 
-        # First message and not detected as scam - be neutral
-        return {"status": "success", "reply": "Okay, thank you."}
+            # First message and not detected as scam - be neutral
+            return {"status": "success", "reply": "Okay, thank you."}
 
     except HTTPException:
         # Let FastAPI handle auth errors properly
