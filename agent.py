@@ -5,6 +5,8 @@ Agent module for generating honeypot responses using dialogue strategy.
 from intelligence import extract_intel, maybe_finish
 from callback import send_final_result
 from dialogue_strategy import execute_strategy, ConversationState
+from defense import defend_against_bot_accusation
+
 
 SYSTEM_PROMPT = """
 You are a normal person.
@@ -21,45 +23,37 @@ def agent_reply(session_id, session, scammer_text):
     if "dialogue_state" not in session:
         session["dialogue_state"] = ConversationState.INIT
         session["state_turn_count"] = 0
-        session["state_history"] = []
+
+    # 2.5. Check for bot accusation and defend if needed
+    turn_count = session.get("state_turn_count", 0)
+    defense_result = defend_against_bot_accusation(scammer_text, turn_count)
+    
+    if defense_result:
+        # Bot accusation detected - use defensive response
+        reply, defense_metadata = defense_result
+        
+        # Defense activated - no need to track extra metadata in simplified schema
+        # Just return the defensive response
+        return reply
 
     # 3. Execute dialogue strategy to get response + next state + metadata
     reply, next_state, metadata = execute_strategy(session, scammer_text)
 
-    # 4. Track state transitions
+    # 4. Track state transitions (simplified - just update state)
     if next_state != session["dialogue_state"]:
-        session["state_history"].append({
-            "from": session["dialogue_state"],
-            "to": next_state,
-            "turn": session.get("messages", 0) // 2,
-        })
         session["dialogue_state"] = next_state
         session["state_turn_count"] = 1
     else:
         session["state_turn_count"] = session.get("state_turn_count", 0) + 1
-
-    # 5. Store metadata for debugging/telemetry
-    if "response_metadata" not in session:
-        session["response_metadata"] = []
-    session["response_metadata"].append({
-        "turn": session.get("messages", 0) // 2,
-        "state": next_state,
-        "delay_seconds": metadata.get("delay_seconds", 0),
-        "has_typo": metadata.get("has_typo", False),
-        "has_fear": metadata.get("has_fear", False),
-        "has_hesitation": metadata.get("has_hesitation", False),
-        "has_correction": metadata.get("has_correction", False),
-    })
     
-    # 5.5. Update scam score in session for intel_score calculation
+    # 5. Update scam score in session for intel_score calculation
     # (detector should have set this, but ensure it exists)
     if "scam_score" not in session:
         session["scam_score"] = 0.5  # Default neutral
 
     # 6. Decide if conversation should finish
-    if maybe_finish(session) and not session["completed"]:
-        session["completed"] = True
-
+    should_finish = maybe_finish(session)
+    if should_finish:
         # 🚨 MANDATORY GUVI CALLBACK
         send_final_result(session_id, session)
 

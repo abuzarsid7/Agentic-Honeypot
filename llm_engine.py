@@ -34,7 +34,19 @@ from collections import OrderedDict
 from normalizer import normalize_for_detection
 from openai import OpenAI
 from groq import Groq
+import redis_client
 
+def get_llm_cache(prompt: str):
+    key = hashlib.sha256(prompt.encode()).hexdigest()
+    return redis_client.get(f"llm_cache:{key}")
+
+def set_llm_cache(prompt: str, response: str):
+    key = hashlib.sha256(prompt.encode()).hexdigest()
+    redis_client.setex(
+        f"llm_cache:{key}",
+        86400,  # 24 hours
+        response
+    )
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════

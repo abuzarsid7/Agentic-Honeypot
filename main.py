@@ -7,6 +7,7 @@ from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
 from dialogue_strategy import get_state_info
+from defense import is_bot_accusation_detected
 import os
 from dotenv import load_dotenv
 
@@ -64,6 +65,17 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             session = get_session(session_id, history)
 
+            # 🛡️ PRIORITY CHECK: Bot accusation (always engage, even on first message)
+            # This ensures defensive responses work even if scam detector misses it
+            is_bot_accusation = is_bot_accusation_detected(message["text"])
+            
+            if is_bot_accusation:
+                # Bot accusation detected - engage immediately to defend
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                track_detection(True)  # Count as engagement
+                return {"status": "success", "reply": reply}
+
             scam_detected = detect_scam(message["text"], history)
             
             # 📊 Track detection result
@@ -75,7 +87,7 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
                 return {"status": "success", "reply": reply}
             
             # Even if not detected as scam, engage if conversation already started
-            if session["messages"] > 0:
+            if len(session.get("history", [])) > 0:
                 # Conversation in progress - keep it going
                 reply = agent_reply(session_id, session, message["text"])
                 update_session(session_id, message, reply)

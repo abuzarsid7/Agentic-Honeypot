@@ -9,9 +9,17 @@ Combines multiple extraction techniques:
 4. Merge & deduplication (normalized, consolidated results)
 """
 
+import json
 import re
 import os
 from typing import Dict, List, Set, Tuple
+from redis_client import redis_client
+
+def store_intel(session_id, intel_data):
+    redis_client.rpush(
+        f"intel:{session_id}",
+        json.dumps(intel_data)
+    )
 
 # ═══════════════════════════════════════════════════════════════
 # IMPORT DEPENDENCIES
@@ -486,7 +494,7 @@ def extract_intel(session, text):
         session["intel_extraction_history"] = []
     
     session["intel_extraction_history"].append({
-        "turn": session.get("messages", 0) // 2,
+        "turn": len(session.get("history", [])) // 2,
         "new_intel_count": total_new_intel,
         "breakdown": new_counts.copy(),
         "extraction_methods_used": {
@@ -521,7 +529,7 @@ def calculate_intel_score(session: dict) -> dict:
     """
     intel = session.get("intel", {})
     history = session.get("history", [])
-    messages = session.get("messages", 0)
+    messages = len(history)
     
     # ── 1. Unique Artifacts Score (0-1) ────────────────────────
     # Count unique intelligence items across all types
@@ -696,7 +704,7 @@ def should_close_conversation(session: dict) -> tuple[bool, str]:
     Returns:
         (should_close, reason)
     """
-    messages = session.get("messages", 0)
+    messages = len(session.get("history", []))
     intel_score_data = calculate_intel_score(session)
     intel_score = intel_score_data["score"]
     components = intel_score_data["components"]

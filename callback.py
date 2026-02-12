@@ -11,7 +11,7 @@ def send_final_result(session_id, session):
     payload = {
         "sessionId": session_id,
         "scamDetected": True,
-        "totalMessagesExchanged": session["messages"],
+        "totalMessagesExchanged": len(session.get("history", [])),
         "extractedIntelligence": session["intel"],
         "agentNotes": notes
     }
@@ -58,7 +58,7 @@ def generate_agent_notes(session):
         notes.append(f"Mentioned {len(intel['bankAccounts'])} account number(s)")
     
     # Analyze conversation pattern
-    if session["messages"] < 10:
+    if len(session.get("history", [])) < 10:
         notes.append("Scammer attempted quick conversion")
     else:
         notes.append("Extended conversation to build trust")
