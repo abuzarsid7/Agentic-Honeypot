@@ -1,10 +1,11 @@
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from detector import detect_scam
+from detector import detect_scam, detect_scam_detailed
 from agent import agent_reply
 from memory import get_session, update_session
 from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
+from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
 import os
 from dotenv import load_dotenv
 
@@ -92,6 +93,87 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             "status": "error",
             "reply": "Temporary issue, please retry"
         }
+
+
+@app.post("/debug/score")
+def debug_scoring(payload: dict, x_api_key: str = Header(None)):
+    """
+    🔍 DEBUG ENDPOINT: Show hybrid scoring breakdown
+    
+    Returns the multi-signal weighted score and per-signal details.
+    Useful for tuning thresholds and understanding detection decisions.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    text = payload.get("text", "")
+    history = payload.get("conversationHistory", [])
+    if not text:
+        return {"status": "error", "message": "Text field required"}
+    
+    result = detect_scam_detailed(text, history)
+    
+    return {
+        "status": "success",
+        "input": text,
+        **result,
+    }
+
+
+@app.post("/debug/llm")
+def debug_llm_analysis(payload: dict, x_api_key: str = Header(None)):
+    """
+    🧠 DEBUG ENDPOINT: Full LLM analysis
+    
+    Returns structured JSON with:
+    - Intent classification (label, confidence, reasoning)
+    - Social engineering detection (tactics, severity, details)
+    - Scam narrative classification (category, stage, description)
+    - Composite score and source (llm / heuristic)
+    - Cache hit/miss status
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    text = payload.get("text", "")
+    history = payload.get("conversationHistory", [])
+    if not text:
+        return {"status": "error", "message": "Text field required"}
+    
+    result = analyze_message(text, history)
+    
+    return {
+        "status": "success",
+        "input": text,
+        **result,
+    }
+
+
+@app.get("/debug/llm/cache")
+def debug_llm_cache(x_api_key: str = Header(None)):
+    """
+    📊 LLM cache statistics: size, hit rate, TTL.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return {
+        "status": "success",
+        "provider": get_provider_info(),
+        "cache": get_cache_stats(),
+    }
+
+
+@app.post("/debug/llm/cache/clear")
+def debug_llm_cache_clear(x_api_key: str = Header(None)):
+    """
+    🗑️ Flush LLM analysis cache.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    clear_cache()
+    return {"status": "success", "message": "LLM cache cleared"}
 
 
 @app.post("/debug/normalize")

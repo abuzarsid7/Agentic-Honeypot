@@ -2,3 +2,5 @@ fastapi
 uvicorn
 requests
 python-dotenv
+openai          # optional: enables LLM-backed intent scoring (set OPENAI_API_KEY or GROQ_API_KEY)
+groq            # optional: enables LLM-backed intent scoring (set OPENAI_API_KEY or GROQ_API_KEY)
