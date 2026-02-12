@@ -2,10 +2,11 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from detector import detect_scam, detect_scam_detailed
 from agent import agent_reply
-from memory import get_session, update_session
+from memory import get_session, update_session, sessions
 from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
+from dialogue_strategy import get_state_info
 import os
 from dotenv import load_dotenv
 
@@ -209,6 +210,283 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
             "lowercased": report["stage7_whitespace"] != report["stage8_final"]
         }
     }
+
+
+@app.post("/debug/strategy")
+def debug_strategy(payload: dict, x_api_key: str = Header(None)):
+    """
+    🎯 DEBUG ENDPOINT: Show dialogue strategy state and progression
+    
+    Returns current state, goal, extraction targets, and state history.
+    Useful for understanding conversation flow and state transitions.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    session_id = payload.get("sessionId", "")
+    if not session_id:
+        return {"status": "error", "message": "sessionId field required"}
+    
+    # Check if session exists
+    if session_id not in sessions:
+        return {
+            "status": "error",
+            "message": f"Session {session_id} not found"
+        }
+    
+    session = sessions[session_id]
+    current_state = session.get("dialogue_state", "INIT")
+    state_info = get_state_info(current_state)
+    
+    # Calculate extraction progress
+    intel = session.get("intel", {})
+    extraction_progress = {
+        "upi_ids": len(intel.get("upiIds", [])),
+        "phone_numbers": len(intel.get("phoneNumbers", [])),
+        "phishing_links": len(intel.get("phishingLinks", [])),
+        "bank_accounts": len(intel.get("bankAccounts", [])),
+        "suspicious_keywords": len(intel.get("suspiciousKeywords", [])),
+    }
+    
+    # Get recent micro-behaviors (last 5 responses)
+    metadata_history = session.get("response_metadata", [])
+    recent_metadata = metadata_history[-5:] if len(metadata_history) > 5 else metadata_history
+    
+    # Calculate micro-behavior statistics
+    total_responses = len(metadata_history)
+    micro_behavior_stats = {
+        "total_responses": total_responses,
+        "delays_used": sum(1 for m in metadata_history if m.get("delay_seconds", 0) > 0),
+        "fear_expressed": sum(1 for m in metadata_history if m.get("has_fear", False)),
+        "hesitation_shown": sum(1 for m in metadata_history if m.get("has_hesitation", False)),
+        "typos_made": sum(1 for m in metadata_history if m.get("has_typo", False)),
+        "corrections_made": sum(1 for m in metadata_history if m.get("has_correction", False)),
+    }
+    
+    return {
+        "status": "success",
+        "session_id": session_id,
+        "current_state": current_state,
+        "state_goal": state_info.get("goal", ""),
+        "extraction_targets": state_info.get("extraction_targets", []),
+        "state_turn_count": session.get("state_turn_count", 0),
+        "max_turns_in_state": state_info.get("max_turns", 0),
+        "state_history": session.get("state_history", []),
+        "extraction_progress": extraction_progress,
+        "total_messages": session.get("messages", 0),
+        "conversation_completed": session.get("completed", False),
+        "micro_behaviors": {
+            "recent_responses": recent_metadata,
+            "statistics": micro_behavior_stats,
+        },
+    }
+
+
+@app.post("/debug/intelligence")
+def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
+    """
+    🔍 DEBUG ENDPOINT: Show hybrid intelligence extraction breakdown
+    
+    Returns extraction results from all three methods:
+    - Regex-based extraction
+    - Advanced pattern extraction (obfuscated URLs, split numbers)
+    - LLM-based extraction
+    Plus merge/deduplication statistics.
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    text = payload.get("text", "")
+    if not text:
+        return {"status": "error", "message": "Text field required"}
+    
+    # Import extraction functions
+    from intelligence import (
+        extract_obfuscated_urls,
+        extract_split_numbers,
+        extract_number_words,
+        extract_intel_with_llm,
+        merge_and_deduplicate,
+        normalize_unicode,
+        remove_zero_width,
+        normalize_whitespace
+    )
+    import re
+    
+    # Light normalization
+    text_clean = normalize_unicode(text)
+    text_clean = remove_zero_width(text_clean)
+    text_clean = normalize_whitespace(text_clean)
+    text_lower = text_clean.lower()
+    
+    # REGEX extraction
+    regex_results = {
+        "upiIds": re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean),
+        "phoneNumbers": re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean),
+        "phishingLinks": [link.rstrip('.,;:!?)') for link in re.findall(r"https?://\S+", text_clean)],
+        "bankAccounts": [acc for acc in re.findall(r"\b\d{8,16}\b", text_clean) if len(acc) != 10],
+        "suspiciousKeywords": [kw for kw in ['upi', 'verify', 'urgent', 'blocked', 'otp', 'cvv'] if kw in text_lower]
+    }
+    
+    # ADVANCED extraction
+    advanced_results = {
+        "upiIds": [],
+        "phoneNumbers": extract_split_numbers(text) + extract_number_words(text),
+        "phishingLinks": extract_obfuscated_urls(text),
+        "bankAccounts": [],
+        "suspiciousKeywords": []
+    }
+    
+    # LLM extraction
+    llm_results = extract_intel_with_llm(text, [])
+    
+    # MERGE
+    merged = merge_and_deduplicate(regex_results, advanced_results, llm_results)
+    
+    return {
+        "status": "success",
+        "input": text,
+        "extraction_methods": {
+            "regex": {
+                "upis": len(regex_results["upiIds"]),
+                "phones": len(regex_results["phoneNumbers"]),
+                "urls": len(regex_results["phishingLinks"]),
+                "accounts": len(regex_results["bankAccounts"]),
+                "results": regex_results
+            },
+            "advanced_patterns": {
+                "phones": len(advanced_results["phoneNumbers"]),
+                "urls": len(advanced_results["phishingLinks"]),
+                "results": advanced_results
+            },
+            "llm": {
+                "upis": len(llm_results.get("upiIds", [])),
+                "phones": len(llm_results.get("phoneNumbers", [])),
+                "urls": len(llm_results.get("phishingLinks", [])),
+                "source": llm_results.get("source", "unavailable"),
+                "results": llm_results
+            }
+        },
+        "merged_results": {
+            "upis": len(merged["upiIds"]),
+            "phones": len(merged["phoneNumbers"]),
+            "urls": len(merged["phishingLinks"]),
+            "accounts": len(merged["bankAccounts"]),
+            "keywords": len(merged["suspiciousKeywords"]),
+            "results": merged
+        },
+        "deduplication_stats": {
+            "total_before": {
+                "phones": len(regex_results["phoneNumbers"]) + len(advanced_results["phoneNumbers"]) + len(llm_results.get("phoneNumbers", [])),
+                "urls": len(regex_results["phishingLinks"]) + len(advanced_results["phishingLinks"]) + len(llm_results.get("phishingLinks", []))
+            },
+            "total_after": {
+                "phones": len(merged["phoneNumbers"]),
+                "urls": len(merged["phishingLinks"])
+            }
+        }
+    }
+
+
+@app.post("/debug/intel_score")
+def debug_intel_score(payload: dict, x_api_key: str = Header(None)):
+    """
+    📊 DEBUG ENDPOINT: Show intelligent intel scoring data
+    
+    Returns:
+    - Weighted intel score (0-1)
+    - Component scores (artifacts, scam_confidence, engagement, novelty)
+    - Scammer pattern detection
+    - Closing decision with reasoning
+    - Extraction history timeline
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    # Create mock session with provided data or use session_id
+    session_id = payload.get("session_id")
+    
+    if session_id:
+        # Get existing session
+        session = sessions.get(session_id)
+        if not session:
+            return {"status": "error", "message": "Session not found"}
+    else:
+        # Create mock session from provided intel
+        session = {
+            "messages": payload.get("messages", 10),
+            "scam_score": payload.get("scam_score", 0.65),
+            "intel": payload.get("intel", {
+                "upiIds": [],
+                "phoneNumbers": [],
+                "phishingLinks": [],
+                "bankAccounts": [],
+                "suspiciousKeywords": []
+            }),
+            "history": payload.get("history", []),
+            "intel_extraction_history": payload.get("intel_extraction_history", [])
+        }
+    
+    from intelligence import (
+        calculate_intel_score,
+        detect_scammer_patterns,
+        should_close_conversation
+    )
+    
+    # Calculate scores
+    intel_score_data = calculate_intel_score(session)
+    patterns = detect_scammer_patterns(session)
+    should_close, close_reason = should_close_conversation(session)
+    
+    return {
+        "status": "success",
+        "intel_score": {
+            "overall_score": round(intel_score_data["score"], 3),
+            "components": {
+                k: round(v, 3) 
+                for k, v in intel_score_data["components"].items()
+            },
+            "weights": intel_score_data["weights"],
+            "details": intel_score_data["details"]
+        },
+        "scammer_patterns": {
+            "repeated_pressure": patterns["repeated_pressure"],
+            "disengagement": patterns["disengagement"],
+            "stale_intel": patterns["stale_intel"],
+            "severity": round(patterns["severity"], 2)
+        },
+        "closing_decision": {
+            "should_close": should_close,
+            "reason": close_reason,
+            "interpretation": _interpret_close_reason(close_reason)
+        },
+        "extraction_timeline": session.get("intel_extraction_history", []),
+        "session_stats": {
+            "total_messages": session.get("messages", 0),
+            "total_intel_items": sum(
+                len(v) if isinstance(v, list) else 0 
+                for v in session.get("intel", {}).values()
+            ),
+            "scam_confidence": session.get("scam_score", 0.0)
+        }
+    }
+
+
+def _interpret_close_reason(reason: str) -> str:
+    """Provide human-readable interpretation of close reasons."""
+    interpretations = {
+        "hard_limit_reached": "⚠️ Conversation exceeded 30 messages (safety limit)",
+        "too_early": "⏳ Too soon to close (minimum 6 messages required)",
+        "intel_stagnation": "📉 No new intelligence in last 3 turns, sufficient data collected",
+        "scammer_pressure": "🔴 Scammer repeatedly pressuring, closing strategically",
+        "scammer_disengaged": "👋 Scammer showing signs of disengagement, finalizing now",
+        "high_quality_complete": "✅ High-quality extraction achieved (score > 0.75)",
+        "diminishing_returns": "📊 Good intel collected, but novelty rate declining",
+        "multiple_warning_signs": "⚡ Multiple closing conditions detected",
+        "continue_extraction": "🔄 Continue conversation, still extracting value",
+        "normal_flow": "➡️ Normal conversation flow, no closing signal yet"
+    }
+    return interpretations.get(reason, f"Unknown reason: {reason}")
 
 
 if __name__ == "__main__":
