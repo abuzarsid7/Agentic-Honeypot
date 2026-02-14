@@ -1,0 +1,100 @@
+@import "tailwindcss";
+
+/* ═══════════════════════════════════════════════════════════════
+   SOC-GRADE DESIGN SYSTEM — AGNETIC HONEYPOT
+   Dark analyst console with severity-based color vocabulary
+   ═══════════════════════════════════════════════════════════════ */
+
+@theme {
+  --color-surface-900: #0a0e17;
+  --color-surface-800: #0f1520;
+  --color-surface-700: #151d2e;
+  --color-surface-600: #1b253a;
+  --color-surface-500: #243046;
+  --color-surface-400: #2d3b52;
+
+  --color-severity-critical: #ef4444;
+  --color-severity-high: #f97316;
+  --color-severity-medium: #eab308;
+  --color-severity-low: #22c55e;
+  --color-severity-info: #3b82f6;
+
+  --color-accent: #14b8a6;
+  --color-accent-dim: #0d9488;
+  --color-accent-glow: #2dd4bf;
+
+  --color-text-primary: #e2e8f0;
+  --color-text-secondary: #94a3b8;
+  --color-text-muted: #64748b;
+  --color-text-inverse: #0a0e17;
+
+  --color-border: #1e293b;
+  --color-border-hover: #334155;
+
+  --font-mono: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: var(--color-surface-900);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: var(--color-surface-800); }
+::-webkit-scrollbar-thumb { background: var(--color-surface-500); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-surface-400); }
+
+.glass-panel {
+  background: rgba(15, 21, 32, 0.8);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-border);
+}
+
+.pulse-live {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+@keyframes pulse-glow {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.recharts-text { fill: var(--color-text-secondary) !important; font-size: 11px; }
+.recharts-cartesian-grid line { stroke: var(--color-border) !important; }
+
+/* Landing Page Animations */
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slide-up {
+  from { 
+    opacity: 0; 
+    transform: translateY(20px); 
+  }
+  to { 
+    opacity: 1; 
+    transform: translateY(0); 
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.8s ease-out;
+}
+
+.animate-fade-in-delay {
+  animation: fade-in 0.8s ease-out 0.2s both;
+}
+
+.animate-fade-in-delay-2 {
+  animation: fade-in 0.8s ease-out 0.4s both;
+}
+
+.animate-slide-up {
+  animation: slide-up 0.8s ease-out;
+}

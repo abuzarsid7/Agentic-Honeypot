@@ -50,6 +50,78 @@ def metrics_endpoint(x_api_key: str = Header(None)):
     return get_metrics()
 
 
+@app.get("/sessions")
+def get_sessions(x_api_key: str = Header(None)):
+    """
+    📋 SESSIONS ENDPOINT: Get all active sessions
+    
+    Returns list of all sessions with basic info for dashboard display
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    from memory import sessions
+    from datetime import datetime
+    
+    session_list = []
+    for session_id, session in sessions.items():
+        # Calculate basic metrics
+        messages = len(session.get("history", [])) // 2  # Divide by 2 (user+agent pairs)
+        intel = session.get("intel", {})
+        intel_count = sum(len(v) if isinstance(v, list) else 0 for v in intel.values())
+        
+        # Get last activity timestamp
+        last_activity = session.get("last_updated", datetime.now().timestamp())
+        
+        # Determine if there are hard triggers
+        hard_trigger = session.get("hard_trigger", False)
+        
+        # Check for bot accusation defense
+        bot_accusation = session.get("bot_accusation_triggered", False)
+        
+        session_list.append({
+            "id": session_id,
+            "score": session.get("scam_score", 0.0),
+            "state": session.get("dialogue_state", "INIT"),
+            "lastTactic": session.get("last_tactic", "Unknown"),
+            "intelCount": intel_count,
+            "messages": messages,
+            "lastActivity": int(last_activity * 1000),  # Convert to milliseconds
+            "hardTrigger": hard_trigger,
+            "botAccusation": bot_accusation,
+        })
+    
+    return {
+        "status": "success",
+        "sessions": session_list,
+        "total": len(session_list)
+    }
+
+
+@app.get("/sessions/{session_id}")
+def get_session_details(session_id: str, x_api_key: str = Header(None)):
+    """
+    🔍 SESSION DETAILS ENDPOINT: Get full session data
+    
+    Returns complete session information including conversation history,
+    intelligence extracted, and dialogue state
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    from memory import sessions
+    
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    return {
+        "status": "success",
+        "session": session
+    }
+
+
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
     try:
@@ -499,6 +571,75 @@ def _interpret_close_reason(reason: str) -> str:
         "normal_flow": "➡️ Normal conversation flow, no closing signal yet"
     }
     return interpretations.get(reason, f"Unknown reason: {reason}")
+
+
+@app.get("/api/regulatory/evidence/{session_id}")
+def get_evidence_packet(session_id: str, mask_pii: bool = True, x_api_key: str = Header(None)):
+    """
+    📦 EVIDENCE PACKET ENDPOINT: Generate compliance-ready evidence for regulatory filing
+    
+    Returns structured evidence packet for a session including:
+    - Scam summary, risk verdict, conversation timeline
+    - Extracted intelligence artifacts
+    - Closure reason and classification
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    from datetime import datetime
+    
+    intel = session.get("intel", {})
+    history = session.get("history", [])
+    
+    def _mask(value):
+        if not mask_pii or not value or len(str(value)) <= 4:
+            return value
+        s = str(value)
+        return s[:2] + '*' * (len(s) - 4) + s[-2:]
+
+    # Build timeline
+    timeline = []
+    for i, msg in enumerate(history):
+        timeline.append({
+            "index": i + 1,
+            "role": msg.get("role", "unknown"),
+            "text": msg.get("text", ""),
+            "timestamp": msg.get("timestamp", None),
+        })
+
+    # Build artifacts list
+    artifacts = {}
+    for key, values in intel.items():
+        if isinstance(values, list) and values:
+            artifacts[key] = [_mask(v) if mask_pii else v for v in values]
+
+    evidence = {
+        "session_id": session_id,
+        "generated_at": datetime.now().isoformat(),
+        "classification": {
+            "scam_score": session.get("scam_score", 0.0),
+            "dialogue_state": session.get("dialogue_state", "UNKNOWN"),
+            "last_tactic": session.get("last_tactic", "Unknown"),
+            "hard_trigger": session.get("hard_trigger", False),
+        },
+        "summary": {
+            "total_messages": len(history),
+            "intel_items_extracted": sum(
+                len(v) if isinstance(v, list) else 0
+                for v in intel.values()
+            ),
+            "closure_reason": session.get("close_reason", "N/A"),
+        },
+        "timeline": timeline,
+        "artifacts": artifacts,
+        "pii_masked": mask_pii,
+    }
+    
+    return {"status": "success", "evidence": evidence}
 
 
 if __name__ == "__main__":

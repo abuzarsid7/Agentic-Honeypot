@@ -2,7 +2,7 @@
 LLM Analysis Engine
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Centralized LLM integration for the Agentic Honeypot.
+Centralized LLM integration for the Agnetic HoneyPot.
 Provides three analysis capabilities via a single batched call:
   1. Intent Classification       — what the scammer is trying to do
   2. Social Engineering Detection — manipulation tactics in use
