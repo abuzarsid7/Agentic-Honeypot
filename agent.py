@@ -57,14 +57,13 @@ def agent_reply(session_id, session, scammer_text):
     # (detector should have set this, but ensure it exists)
     if "scam_score" not in session:
         session["scam_score"] = 0.5  # Default neutral
-        
-    print("MESSAGES:", session.get("messages"))
-    print("INTEL:", session.get("intel"))
-    print("FINISH?", should_finish)
 
 
     # 6. Decide if conversation should finish
     should_finish = maybe_finish(session)
+    print("MESSAGES:", session.get("messages"))
+    print("INTEL:", session.get("intel"))
+    print("FINISH?", should_finish)
     if should_finish:
         # 🚨 MANDATORY GUVI CALLBACK
         send_final_result(session_id, session)
