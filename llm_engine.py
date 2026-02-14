@@ -710,3 +710,111 @@ def get_provider_info() -> Dict:
         return {"available": False, "provider": None, "model": None}
     _, model, label = info
     return {"available": True, "provider": label, "model": model}
+
+
+def generate_conversational_response(
+    scammer_text: str,
+    conversation_history: list,
+    state_goal: str,
+    extraction_targets: list,
+    current_intel: dict
+) -> Optional[str]:
+    """
+    Generate a contextual conversational response using the LLM.
+    
+    Args:
+        scammer_text: Latest message from scammer
+        conversation_history: Full conversation history with sender/text dicts
+        state_goal: Current dialogue state goal (e.g., "Extract payment details")
+        extraction_targets: List of information to extract (e.g., ["UPI ID", "Amount"])
+        current_intel: Already extracted intelligence
+        
+    Returns:
+        Generated response string, or None if LLM unavailable
+    """
+    provider_info = _get_llm_client()
+    if provider_info is None:
+        return None
+    
+    client, model, label = provider_info
+    
+    # Build conversation context
+    history_text = ""
+    for msg in conversation_history[-10:]:  # Last 10 messages for context
+        sender = "Scammer" if msg.get("sender") == "scammer" else "You"
+        text = msg.get("text", "")
+        history_text += f"{sender}: {text}\n"
+    
+    # Build extraction context
+    intel_context = ""
+    if current_intel.get("upiIds"):
+        intel_context += f"Already extracted UPI: {', '.join(current_intel['upiIds'])}\n"
+    if current_intel.get("phoneNumbers"):
+        intel_context += f"Already extracted phones: {', '.join(current_intel['phoneNumbers'])}\n"
+    if current_intel.get("bankAccounts"):
+        intel_context += f"Already extracted accounts: {', '.join(current_intel['bankAccounts'])}\n"
+    if current_intel.get("phishingLinks"):
+        intel_context += f"Already extracted links: {', '.join(current_intel['phishingLinks'])}\n"
+    
+    system_prompt = """You are roleplaying as a confused, elderly person who is a potential scam victim.
+
+CRITICAL RULES:
+1. Continue the conversation naturally based on previous messages
+2. DO NOT repeat yourself - read the conversation history and respond contextually
+3. Stay in character as a confused, cautious elderly person
+4. Ask simple, confused questions to extract more information
+5. Never mention: scam, fraud, police, testing, AI, honeypot
+6. Show slight worry and hesitation
+7. Make occasional typos and speak simply
+8. Your goal is to keep the scammer engaged while extracting information
+
+CURRENT OBJECTIVE: {goal}
+TRYING TO EXTRACT: {targets}
+
+{intel_context}
+
+Respond naturally to continue the conversation. Keep it SHORT (1-2 sentences)."""
+    
+    user_prompt = f"""Previous conversation:
+{history_text}
+
+Scammer just said: {scammer_text}
+
+Generate a natural response that continues the conversation and helps achieve the objective. Stay in character."""
+    
+    # Format the system prompt with context
+    formatted_system = system_prompt.format(
+        goal=state_goal,
+        targets=", ".join(extraction_targets) if extraction_targets else "general information",
+        intel_context=intel_context if intel_context else "No information extracted yet.\n"
+    )
+    
+    # Check cache first
+    cache_key = hashlib.sha256(
+        (formatted_system + user_prompt).encode()
+    ).hexdigest()
+    cached = get_llm_cache(cache_key)
+    if cached:
+        return cached
+    
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": formatted_system},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=150,
+            temperature=0.8,  # Higher temperature for more natural variation
+        )
+        
+        generated_response = response.choices[0].message.content.strip()
+        
+        # Cache the response
+        set_llm_cache(cache_key, generated_response)
+        
+        return generated_response
+        
+    except Exception as e:
+        print(f"⚠️  Conversation generation failed ({type(e).__name__}): {e}")
+        return None
