@@ -29,8 +29,8 @@ app.add_middleware(
 
 @app.get("/")
 def health():
-    def root_honeypot(payload: dict, x_api_key: str = Header(None)):
-        return honeypot(payload, x_api_key)
+    # Health check for Render + warm-up
+    return {"status": "ok"}
 
 
 @app.get("/metrics")
