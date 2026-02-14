@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from detector import detect_scam, detect_scam_detailed
 from agent import agent_reply
-from memory import get_session, update_session, sessions
+from memory import get_session, sessions
 from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
@@ -72,7 +72,6 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             if is_bot_accusation:
                 # Bot accusation detected - engage immediately to defend
                 reply = agent_reply(session_id, session, message["text"])
-                update_session(session_id, message, reply)
                 track_detection(True)  # Count as engagement
                 return {"status": "success", "reply": reply}
 
@@ -83,14 +82,12 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             if scam_detected:
                 reply = agent_reply(session_id, session, message["text"])
-                update_session(session_id, message, reply)
                 return {"status": "success", "reply": reply}
             
             # Even if not detected as scam, engage if conversation already started
             if len(session.get("history", [])) > 0:
                 # Conversation in progress - keep it going
                 reply = agent_reply(session_id, session, message["text"])
-                update_session(session_id, message, reply)
                 return {"status": "success", "reply": reply}
 
             # First message and not detected as scam - be neutral
