@@ -448,7 +448,7 @@ def get_next_state(
     has_phone = len(intel.get("phoneNumbers", [])) > 0
     has_urls = len(intel.get("phishingLinks", [])) > 0
     
-    total_messages = len(session.get("history", []))
+    total_messages = session.get("messages", 0)
     
     # ── State transition rules ─────────────────────────────────
     

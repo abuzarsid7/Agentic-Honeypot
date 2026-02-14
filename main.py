@@ -7,7 +7,7 @@ from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
 from dialogue_strategy import get_state_info
-from defense import is_bot_accusation_detected
+from defense import defend_against_bot_accusation
 import os
 from dotenv import load_dotenv
 
@@ -56,57 +56,79 @@ def metrics_endpoint(x_api_key: str = Header(None)):
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
     try:
-        # � Track request with automatic timing
         with track_request():
+
             # 🔐 API key validation
             if x_api_key != API_KEY:
                 raise HTTPException(status_code=401, detail="Invalid API key")
 
             session_id = payload["sessionId"]
             message = payload["message"]
-            history = payload.get("conversationHistory", [])
+            user_text = message["text"]
 
-            session = get_session(session_id, history)
+            session = get_session(session_id)
 
-            # 🛡️ PRIORITY CHECK: Bot accusation (always engage, even on first message)
-            # This ensures defensive responses work even if scam detector misses it
-            is_bot_accusation = is_bot_accusation_detected(message["text"])
-            
-            if is_bot_accusation:
-                # Bot accusation detected - engage immediately to defend
-                reply = agent_reply(session_id, session, message["text"])
-                track_detection(True)  # Count as engagement
-                return {"status": "success", "reply": reply}
+            # ======================================================
+            # 1️⃣ FULL STRUCTURED ANALYSIS (LLM + Heuristic)
+            # ======================================================
+            history = session.get("history", [])
+            analysis = analyze_message(user_text, history)
+            session["last_analysis"] = analysis
 
-            scam_detected = detect_scam(message["text"], history)
-            
-            # 📊 Track detection result
+            composite_score = analysis.get("composite_score", 0.0)
+            scam_detected = composite_score > 0.5
+
             track_detection(scam_detected)
 
-            if scam_detected:
-                reply = agent_reply(session_id, session, message["text"])
-                return {"status": "success", "reply": reply}
-            
-            # Even if not detected as scam, engage if conversation already started
-            if len(session.get("history", [])) > 0:
-                # Conversation in progress - keep it going
-                reply = agent_reply(session_id, session, message["text"])
-                return {"status": "success", "reply": reply}
+            # ======================================================
+            # 2️⃣ BOT ACCUSATION HARD OVERRIDE
+            # ======================================================
+            defense = defend_against_bot_accusation(
+                scammer_text=user_text,
+                turn_count=session.get("messages", 0)
+            )
 
-            # First message and not detected as scam - be neutral
+            if defense:
+                response, metadata = defense
+                return {"status": "success", "reply": response}
+
+            # ======================================================
+            # 3️⃣ CHECK IF CONVERSATION ALREADY FINISHED
+            # ======================================================
+            if session.get("completed", False):
+                return {
+                    "status": "success",
+                    "reply": "I have to go now. Goodbye.",
+                    "conversation_ended": True
+                }
+
+            # ======================================================
+            # 4️⃣ NORMAL AGENT EXECUTION
+            # ======================================================
+            if scam_detected or len(session.get("history", [])) > 0:
+                reply = agent_reply(session_id, session, user_text)
+                ended = session.get("completed", False)
+                return {
+                    "status": "success",
+                    "reply": reply,
+                    **({
+                        "conversation_ended": True
+                    } if ended else {})
+                }
+
+            # ======================================================
+            # 4️⃣ FIRST MESSAGE + BENIGN
+            # ======================================================
             return {"status": "success", "reply": "Okay, thank you."}
 
     except HTTPException:
-        # Let FastAPI handle auth errors properly
         raise
 
-    except Exception as e:
-        # 🚨 SAFETY NET: never return empty response
+    except Exception:
         return {
             "status": "error",
             "reply": "Temporary issue, please retry"
         }
-
 
 @app.post("/debug/score")
 def debug_scoring(payload: dict, x_api_key: str = Header(None)):

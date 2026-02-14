@@ -494,7 +494,7 @@ def extract_intel(session, text):
         session["intel_extraction_history"] = []
     
     session["intel_extraction_history"].append({
-        "turn": len(session.get("history", [])) // 2,
+        "turn": session.get("messages", 0),
         "new_intel_count": total_new_intel,
         "breakdown": new_counts.copy(),
         "extraction_methods_used": {
@@ -704,7 +704,7 @@ def should_close_conversation(session: dict) -> tuple[bool, str]:
     Returns:
         (should_close, reason)
     """
-    messages = len(session.get("history", []))
+    messages = session.get("messages", 0)
     intel_score_data = calculate_intel_score(session)
     intel_score = intel_score_data["score"]
     components = intel_score_data["components"]

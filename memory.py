@@ -14,13 +14,13 @@ SESSION_TTL = 3600  # 1 hour
 sessions = {}
 
 
-def get_session(session_id: str, history: list = None):
+def get_session(session_id: str):
     """
     Retrieve session from Redis. Creates new session if not found.
+    Never accepts external history to prevent overwriting stored state.
     
     Args:
         session_id: Unique session identifier
-        history: Optional conversation history to initialize with
         
     Returns:
         Session dict with intelligence, state, and history
@@ -34,9 +34,10 @@ def get_session(session_id: str, history: list = None):
         sessions[session_id] = session
         return session
 
-    # If session doesn't exist, create new one
+    # If session doesn't exist, create new one with empty state
     session = {
-        "history": history or [],
+        "history": [],
+        "messages": 0,
         "scam_score": 0.5,
         "intel": {
             "phoneNumbers": [],

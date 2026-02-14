@@ -59,27 +59,30 @@ def agent_reply(session_id, session, scammer_text):
         session["scam_score"] = 0.5  # Default neutral
 
 
-    # 6. Decide if conversation should finish
+    # 6. Append history before finish check
+    if "history" not in session:
+        session["history"] = []
+    session["history"].append({
+        "sender": "scammer",
+        "text": scammer_text
+    })
+    session["history"].append({
+        "sender": "user",
+        "text": reply
+    })
+
+    # 7. Decide if conversation should finish
     should_finish = maybe_finish(session)
     print("MESSAGES:", session.get("messages"))
     print("INTEL:", session.get("intel"))
     print("FINISH?", should_finish)
     if should_finish:
+        # Mark session as completed so future messages are rejected
+        session["completed"] = True
         # 🚨 MANDATORY GUVI CALLBACK
         send_final_result(session_id, session)
 
-    if "history" not in session:
-        session["history"] = []
-    session["history"].append({
-    "sender": "scammer",
-    "text": scammer_text
-    })
-    session["history"].append({
-    "sender": "user",
-    "text": reply
-})
-    
-    # 7. Save session back to Redis after all updates
+    # 8. Save session back to Redis after all updates
     save_session(session_id, session)
 
     return reply
