@@ -663,29 +663,14 @@ def generate_state_response(
     # Extract previous claims for consistency
     claims = extract_honeypot_claims(history)
     
-    # TRY TO GENERATE CONTEXTUAL RESPONSE USING LLM FIRST
-    response = None
-    if len(history) > 2:  # Only use LLM if there's conversation history
-        from llm_engine import generate_conversational_response
-        
-        response = generate_conversational_response(
-            scammer_text=scammer_text,
-            conversation_history=history,
-            state_goal=config.get("goal", ""),
-            extraction_targets=config.get("extraction_targets", []),
-            current_intel=intel
-        )
+    # Pick response (cycle through, then random)
+    if turn_in_state < len(responses):
+        template = responses[turn_in_state]
+    else:
+        template = random.choice(responses)
     
-    # FALLBACK TO TEMPLATE RESPONSES if LLM unavailable or failed
-    if response is None:
-        # Pick response (cycle through, then random)
-        if turn_in_state < len(responses):
-            template = responses[turn_in_state]
-        else:
-            template = random.choice(responses)
-        
-        # Interpolate placeholders with consistent persona
-        response = _interpolate_response(template, intel, scammer_text, claims)
+    # Interpolate placeholders with consistent persona
+    response = _interpolate_response(template, intel, scammer_text, claims)
     
     # Initialize metadata
     metadata = {
