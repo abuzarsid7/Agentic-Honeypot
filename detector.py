@@ -496,6 +496,11 @@ def detect_scam(text: str, history: list) -> bool:
     # Secondary: suspicious + conversation already ongoing
     if result["is_suspicious"] and len(history) > 0:
         return True
+    
+    # NEW: suspicious + authority impersonation → engage immediately (even on first message)
+    # Messages claiming to be from banks, police, cyber cell should always engage
+    if result["is_suspicious"] and result["signals"]["authority"]["score"] >= 0.3:
+        return True
 
     # Tertiary: hard signals (URL / phone / UPI) maintain backward compat
     # Check ORIGINAL text for UPI (@ survives) and normalized for URLs/phones
