@@ -45,3 +45,14 @@ htmlcov/
 # Runtime artifacts
 # ======================
 *.sqlite3
+
+# ======================
+# Frontend / Node.js
+# ======================
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+package-lock.json
+frontend/package-lock.json

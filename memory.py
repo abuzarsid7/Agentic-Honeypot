@@ -7,6 +7,7 @@ from dialogue_strategy import ConversationState
 
 import json
 import hashlib
+import time
 from redis_client import redis_client
 
 SESSION_TTL = 3600  # 1 hour
@@ -52,6 +53,8 @@ def get_session(session_id: str):
         "dialogue_state": ConversationState.INIT,
         "state_turn_count": 0,
         "message_hashes": {},  # {hash: count} for deduplication
+        "last_updated": time.time(),
+        "created_at": time.time(),
     }
 
     save_session(session_id, session)
@@ -65,6 +68,9 @@ def save_session(session_id: str, session: dict):
     Also indexes extracted intel artifacts globally for cross-session
     scammer tracking (phone numbers, UPI IDs, URLs).
     """
+    # Update last_updated timestamp
+    session["last_updated"] = time.time()
+    
     key = f"session:{session_id}"
 
     redis_client.setex(

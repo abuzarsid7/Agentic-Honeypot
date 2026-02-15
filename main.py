@@ -54,6 +54,87 @@ def metrics_endpoint(x_api_key: str = Header(None)):
     return get_metrics()
 
 
+@app.get("/sessions")
+def list_sessions(x_api_key: str = Header(None)):
+    """
+    📋 LIST SESSIONS: Get all active sessions
+    
+    Returns list of session summaries with:
+    - Session ID, score, state, message count
+    - Last activity timestamp
+    - Intelligence extraction count
+    - Hard trigger status
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    session_list = []
+    for session_id, session in sessions.items():
+        intel = session.get("intel", {})
+        intel_count = sum(
+            len(v) if isinstance(v, list) else 0 
+            for v in intel.values()
+        )
+        
+        # Determine if hard triggers were hit
+        last_analysis = session.get("last_analysis", {})
+        hard_trigger = bool(last_analysis.get("hard_triggers"))
+        
+        # Check for bot accusation defense usage
+        bot_accusation = session.get("bot_accusation_count", 0) > 0
+        
+        session_list.append({
+            "id": session_id,
+            "score": session.get("scam_score", 0.0),
+            "state": session.get("dialogue_state", "INIT"),
+            "messages": session.get("messages", 0),
+            "intelCount": intel_count,
+            "lastActivity": session.get("last_updated", 0),
+            "hardTrigger": hard_trigger,
+            "botAccusation": bot_accusation,
+            "completed": session.get("completed", False),
+            "lastTactic": last_analysis.get("intent", {}).get("label", "Unknown"),
+        })
+    
+    return {"sessions": session_list}
+
+
+@app.get("/session/{session_id}")
+def get_session_details(session_id: str, x_api_key: str = Header(None)):
+    """
+    🔍 SESSION DETAILS: Get full session data
+    
+    Returns complete session information including:
+    - Full conversation history
+    - Extracted intelligence
+    - Dialogue state and progression
+    - Analysis results
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    
+    session = sessions[session_id]
+    
+    return {
+        "status": "success",
+        "session": {
+            "id": session_id,
+            "scam_score": session.get("scam_score", 0.0),
+            "dialogue_state": session.get("dialogue_state", "INIT"),
+            "messages": session.get("messages", 0),
+            "completed": session.get("completed", False),
+            "history": session.get("history", []),
+            "intel": session.get("intel", {}),
+            "last_analysis": session.get("last_analysis", {}),
+            "state_history": session.get("state_history", []),
+            "last_updated": session.get("last_updated", 0),
+        }
+    }
+
+
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
     try:
