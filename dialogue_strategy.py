@@ -674,9 +674,7 @@ def get_next_state(
         if patterns["disengagement"]:
             return ConversationState.CLOSE
         
-        # Pattern 2: Repeated pressure + decent intel → close strategically
-        if patterns["repeated_pressure"] and components["artifacts"] >= 0.3:
-            return ConversationState.CLOSE
+        # Pattern 2: (removed — repeated pressure is an opportunity to extract more)
         
         # Pattern 3: Stale intel (no new intel in 3 turns) + good extraction → close
         if patterns["stale_intel"] and components["artifacts"] >= 0.4:

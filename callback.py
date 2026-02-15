@@ -11,21 +11,11 @@ def send_final_result(session_id, session):
     payload = {
         "sessionId": session_id,
         "scamDetected": True,
-        "totalMessagesExchanged": session.get("messages", 0),
+        "totalMessagesExchanged": len(session.get("history", [])),
         "extractedIntelligence": session["intel"],
         "agentNotes": notes
     }
     
-    print(f"\n{'='*60}")
-    print(f"📤 CALLBACK PAYLOAD for session {session_id}:")
-    print(f"   Messages Exchanged: {payload['totalMessagesExchanged']}")
-    print(f"   Extracted Intelligence:")
-    for key, value in payload['extractedIntelligence'].items():
-        print(f"     • {key}: {value}")
-    print(f"   Agent Notes: {payload['agentNotes']}")
-    print(f"   Endpoint: https://hackathon.guvi.in/api/updateHoneyPotFinalResult")
-    print(f"{'='*60}\n")
-
     try:
         response = requests.post(
             "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",
@@ -67,8 +57,26 @@ def generate_agent_notes(session):
     if intel["bankAccounts"]:
         notes.append(f"Mentioned {len(intel['bankAccounts'])} account number(s)")
     
+    if intel.get("names"):
+        notes.append(f"Identified name(s): {', '.join(intel['names'])}")
+    
+    if intel.get("emails"):
+        notes.append(f"Shared {len(intel['emails'])} email address(es)")
+    
+    if intel.get("telegramHandles"):
+        notes.append(f"Telegram handle(s): {', '.join(intel['telegramHandles'])}")
+    
+    if intel.get("scamCategory"):
+        notes.append(f"Scam type: {', '.join(intel['scamCategory'])}")
+    
+    if intel.get("psychologicalTactics"):
+        notes.append(f"Psychological tactics used: {', '.join(intel['psychologicalTactics'])}")
+    
+    if intel.get("ifscCodes"):
+        notes.append(f"IFSC code(s) mentioned: {', '.join(intel['ifscCodes'])}")
+    
     # Analyze conversation pattern
-    if session.get("messages", 0) < 10:
+    if len(session.get("history", [])) < 10:
         notes.append("Scammer attempted quick conversion")
     else:
         notes.append("Extended conversation to build trust")

@@ -2,18 +2,17 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from detector import detect_scam, detect_scam_detailed
 from agent import agent_reply
-from memory import get_session, sessions, save_session
+from memory import get_session, update_session, sessions
 from normalizer import get_normalization_report
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
 from dialogue_strategy import get_state_info
+from defense import is_bot_accusation_detected
 import os
-import logging
 from dotenv import load_dotenv
 
 load_dotenv()
 
-logger = logging.getLogger(__name__)
 API_KEY = os.getenv("API_KEY")
 
 app = FastAPI()
@@ -30,12 +29,9 @@ app.add_middleware(
 
 @app.get("/")
 def health():
-    # Health check for Railway + warm-up
+    # Health check for Render + warm-up
     return {"status": "ok"}
 
-@app.post("/")
-def root_honeypot(payload: dict, x_api_key: str = Header(None)):
-    return honeypot(payload, x_api_key)
 
 @app.get("/metrics")
 def metrics_endpoint(x_api_key: str = Header(None)):
@@ -54,82 +50,135 @@ def metrics_endpoint(x_api_key: str = Header(None)):
     return get_metrics()
 
 
+@app.get("/sessions")
+def get_sessions(x_api_key: str = Header(None)):
+    """
+    📋 SESSIONS ENDPOINT: Get all active sessions
+    
+    Returns list of all sessions with basic info for dashboard display
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    from memory import sessions
+    from datetime import datetime
+    
+    session_list = []
+    for session_id, session in sessions.items():
+        # Calculate basic metrics
+        messages = len(session.get("history", [])) // 2  # Divide by 2 (user+agent pairs)
+        intel = session.get("intel", {})
+        intel_count = sum(len(v) if isinstance(v, list) else 0 for v in intel.values())
+        
+        # Get last activity timestamp
+        last_activity = session.get("last_updated", datetime.now().timestamp())
+        
+        # Determine if there are hard triggers
+        hard_trigger = session.get("hard_trigger", False)
+        
+        # Check for bot accusation defense
+        bot_accusation = session.get("bot_accusation_triggered", False)
+        
+        session_list.append({
+            "id": session_id,
+            "score": session.get("scam_score", 0.0),
+            "state": session.get("dialogue_state", "INIT"),
+            "lastTactic": session.get("last_tactic", "Unknown"),
+            "intelCount": intel_count,
+            "messages": messages,
+            "lastActivity": int(last_activity * 1000),  # Convert to milliseconds
+            "hardTrigger": hard_trigger,
+            "botAccusation": bot_accusation,
+        })
+    
+    return {
+        "status": "success",
+        "sessions": session_list,
+        "total": len(session_list)
+    }
+
+
+@app.get("/sessions/{session_id}")
+def get_session_details(session_id: str, x_api_key: str = Header(None)):
+    """
+    🔍 SESSION DETAILS ENDPOINT: Get full session data
+    
+    Returns complete session information including conversation history,
+    intelligence extracted, and dialogue state
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    from memory import sessions
+    
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    session = sessions[session_id]
+    
+    return {
+        "status": "success",
+        "session": session
+    }
+
+
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
     try:
+        # � Track request with automatic timing
         with track_request():
-
             # 🔐 API key validation
             if x_api_key != API_KEY:
                 raise HTTPException(status_code=401, detail="Invalid API key")
 
             session_id = payload["sessionId"]
             message = payload["message"]
-            user_text = message["text"]
+            history = payload.get("conversationHistory", [])
 
-            session = get_session(session_id)
+            session = get_session(session_id, history)
 
-            # ======================================================
-            # 1️⃣ CHECK IF CONVERSATION ALREADY FINISHED
-            # ======================================================
-            if session.get("completed", False):
-                return {
-                    "status": "success",
-                    "reply": "I have to go now. Goodbye.",
-                    "conversation_ended": True
-                }
+            # 🛡️ PRIORITY CHECK: Bot accusation (always engage, even on first message)
+            # This ensures defensive responses work even if scam detector misses it
+            is_bot_accusation = is_bot_accusation_detected(message["text"])
+            
+            if is_bot_accusation:
+                # Bot accusation detected - engage immediately to defend
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                track_detection(True)  # Count as engagement
+                return {"status": "success", "reply": reply}
 
-            # ======================================================
-            # 2️⃣ FULL STRUCTURED ANALYSIS (LLM + Heuristic)
-            # ======================================================
-            history = session.get("history", [])
-            analysis = analyze_message(user_text, history)
-            session["last_analysis"] = analysis
-
-            composite_score = analysis.get("composite_score", 0.0)
-            scam_detected = composite_score > 0.5
-
-            # Update session scam_score from actual analysis
-            session["scam_score"] = composite_score
-
+            scam_detected = detect_scam(message["text"], history)
+            
+            # 📊 Track detection result
             track_detection(scam_detected)
 
-            # ======================================================
-            # 3️⃣ NORMAL AGENT EXECUTION
-            # (Bot accusation defense is handled inside agent_reply)
-            # ======================================================
-            if scam_detected or session.get("messages", 0) > 0:
-                reply = agent_reply(session_id, session, user_text)
-                ended = session.get("completed", False)
-                return {
-                    "status": "success",
-                    "reply": reply,
-                    **({
-                        "conversation_ended": True
-                    } if ended else {})
-                }
+            if scam_detected:
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                return {"status": "success", "reply": reply}
+            
+            # Even if not detected as scam, engage if conversation already started
+            if len(session.get("history", [])) > 0:
+                # Conversation in progress - keep it going
+                reply = agent_reply(session_id, session, message["text"])
+                update_session(session_id, message, reply)
+                return {"status": "success", "reply": reply}
 
-            # ======================================================
-            # 4️⃣ FIRST MESSAGE + BENIGN
-            # ======================================================
-            session["messages"] = session.get("messages", 0) + 1
-            benign_reply = "Okay, thank you."
-            if "history" not in session:
-                session["history"] = []
-            session["history"].append({"sender": "scammer", "text": user_text})
-            session["history"].append({"sender": "user", "text": benign_reply})
-            save_session(session_id, session)
-            return {"status": "success", "reply": benign_reply}
+            # First message and not detected as scam - be neutral
+            return {"status": "success", "reply": "Okay, thank you."}
 
     except HTTPException:
+        # Let FastAPI handle auth errors properly
         raise
 
-    except Exception:
-        logger.exception("Honeypot endpoint error")
+    except Exception as e:
+        # 🚨 SAFETY NET: never return empty response
         return {
             "status": "error",
             "reply": "Temporary issue, please retry"
         }
+
 
 @app.post("/debug/score")
 def debug_scoring(payload: dict, x_api_key: str = Header(None)):
@@ -217,7 +266,7 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
     """
     🔍 DEBUG ENDPOINT: Show normalization pipeline stages
     
-    Returns detailed report of how text transforms through 10 stages.
+    Returns detailed report of how text transforms through 8 stages.
     Useful for demo and debugging obfuscation attacks.
     """
     if x_api_key != API_KEY:
@@ -233,19 +282,16 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
         "status": "success",
         "input": text,
         "stages": report,
-        "final": report["stage11_final"],
+        "final": report["stage8_final"],
         "transformations": {
             "unicode_changed": report["original"] != report["stage1_unicode"],
             "zero_width_removed": report["stage1_unicode"] != report["stage2_zero_width"],
             "control_chars_removed": report["stage2_zero_width"] != report["stage3_control_chars"],
             "homoglyphs_normalized": report["stage3_control_chars"] != report["stage4_homoglyphs"],
-            "hex_urls_decoded": report["stage4_homoglyphs"] != report["stage5_hex_urls"],
-            "leetspeak_converted": report["stage5_hex_urls"] != report["stage6_leetspeak"],
-            "char_spacing_collapsed": report["stage6_leetspeak"] != report["stage7_char_spacing"],
-            "urls_deobfuscated": report["stage7_char_spacing"] != report["stage8_urls"],
-            "short_urls_expanded": report["stage8_urls"] != report["stage9_short_urls"],
-            "whitespace_normalized": report["stage9_short_urls"] != report["stage10_whitespace"],
-            "lowercased": report["stage10_whitespace"] != report["stage11_final"]
+            "leetspeak_converted": report["stage4_homoglyphs"] != report["stage5_leetspeak"],
+            "urls_deobfuscated": report["stage5_leetspeak"] != report["stage6_urls"],
+            "whitespace_normalized": report["stage6_urls"] != report["stage7_whitespace"],
+            "lowercased": report["stage7_whitespace"] != report["stage8_final"]
         }
     }
 
@@ -284,6 +330,12 @@ def debug_strategy(payload: dict, x_api_key: str = Header(None)):
         "phishing_links": len(intel.get("phishingLinks", [])),
         "bank_accounts": len(intel.get("bankAccounts", [])),
         "suspicious_keywords": len(intel.get("suspiciousKeywords", [])),
+        "names": len(intel.get("names", [])),
+        "emails": len(intel.get("emails", [])),
+        "telegram_handles": len(intel.get("telegramHandles", [])),
+        "scam_category": len(intel.get("scamCategory", [])),
+        "psychological_tactics": len(intel.get("psychologicalTactics", [])),
+        "ifsc_codes": len(intel.get("ifscCodes", [])),
     }
     
     # Get recent micro-behaviors (last 5 responses)
@@ -338,79 +390,70 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
     if not text:
         return {"status": "error", "message": "Text field required"}
     
-    # Use the actual extraction pipeline (same as honeypot endpoint)
+    # Import extraction functions
     from intelligence import (
-        extract_intel as _extract_intel,
         extract_obfuscated_urls,
         extract_split_numbers,
         extract_number_words,
         extract_intel_with_llm,
         merge_and_deduplicate,
-    )
-    from normalizer import (
-        normalize_unicode, remove_zero_width,
-        remove_control_characters, normalize_homoglyphs,
-        decode_hex_urls, deobfuscate_char_spacing,
-        deobfuscate_urls, expand_shortened_urls, normalize_whitespace
+        normalize_unicode,
+        remove_zero_width,
+        normalize_whitespace
     )
     import re
     
-    # Extraction-safe normalization (same as extract_intel: stages 1-5 + 7-10)
+    # Light normalization
     text_clean = normalize_unicode(text)
     text_clean = remove_zero_width(text_clean)
-    text_clean = remove_control_characters(text_clean)
-    text_clean = normalize_homoglyphs(text_clean)
-    text_clean = decode_hex_urls(text_clean)
-    text_clean = deobfuscate_char_spacing(text_clean)
-    text_clean = deobfuscate_urls(text_clean)
-    text_clean = expand_shortened_urls(text_clean)
     text_clean = normalize_whitespace(text_clean)
     text_lower = text_clean.lower()
     
-    # Run extraction on a temporary session to get full results
-    temp_session = {
-        "intel": {"upiIds": [], "phoneNumbers": [], "phishingLinks": [],
-                  "bankAccounts": [], "suspiciousKeywords": []},
-        "history": [],
-        "messages": 0,
-    }
-    _extract_intel(temp_session, text)
-    
-    # Also get per-method breakdown for debug visibility
-    _UPI_HANDLES = (
-        'paytm', 'ybl', 'okaxis', 'okhdfcbank', 'oksbi', 'okicici',
-        'upi', 'apl', 'ibl', 'sbi', 'hdfcbank', 'icici', 'axisbank',
-        'axl', 'boi', 'citi', 'citigold', 'dlb', 'fbl', 'federal',
-        'idbi', 'idfcbank', 'indus', 'kbl', 'kotak', 'lvb', 'pnb',
-        'rbl', 'sib', 'uco', 'union', 'vijb', 'abfspay', 'freecharge',
-        'jio', 'airtel', 'postbank', 'waheed', 'slice', 'jupiter',
-        'fi', 'gpay', 'phonepe', 'amazonpay', 'mobikwik', 'niyopay',
-    )
-    _upi_handle_pattern = '|'.join(re.escape(h) for h in _UPI_HANDLES)
-    upi_regex = rf"[a-zA-Z0-9.\-_]{{2,}}@(?:{_upi_handle_pattern})\b"
-    
+    # REGEX extraction
+    all_emails = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', text_clean)
+    upi_ids = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
+    upi_set = set(u.lower() for u in upi_ids)
+    telegram_handles_raw = re.findall(r'(?:^|\s)@([a-zA-Z][a-zA-Z0-9_]{4,31})\b', text_clean)
+    _UPI_SUFFIXES = {'paytm', 'ybl', 'okaxis', 'oksbi', 'okicici', 'upi', 'sbi',
+                     'hdfcbank', 'icici', 'axisbank', 'kotak', 'pnb', 'gpay', 'phonepe'}
     regex_results = {
-        "upiIds": re.findall(upi_regex, text_clean, re.IGNORECASE),
+        "upiIds": upi_ids,
         "phoneNumbers": re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean),
         "phishingLinks": [link.rstrip('.,;:!?)') for link in re.findall(r"https?://\S+", text_clean)],
-        "bankAccounts": [acc for acc in re.findall(r"\b\d{9,18}\b", text_clean)],
-        "suspiciousKeywords": [kw for kw in ['upi', 'verify', 'urgent', 'blocked', 'otp', 'cvv'] if kw in text_lower]
+        "bankAccounts": [acc for acc in re.findall(r"\b\d{8,16}\b", text_clean) if len(acc) != 10],
+        "suspiciousKeywords": [kw for kw in ['upi', 'verify', 'urgent', 'blocked', 'otp', 'cvv'] if kw in text_lower],
+        "names": [],
+        "emails": [e for e in all_emails if e.lower() not in upi_set],
+        "telegramHandles": [f"@{h}" for h in telegram_handles_raw if h.lower() not in _UPI_SUFFIXES],
+        "scamCategory": [],
+        "psychologicalTactics": [],
+        "ifscCodes": re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text_clean),
     }
     
+    # ADVANCED extraction
     advanced_results = {
         "upiIds": [],
         "phoneNumbers": extract_split_numbers(text) + extract_number_words(text),
         "phishingLinks": extract_obfuscated_urls(text),
         "bankAccounts": [],
-        "suspiciousKeywords": []
+        "suspiciousKeywords": [],
+        "names": [],
+        "emails": [],
+        "telegramHandles": [],
+        "scamCategory": [],
+        "psychologicalTactics": [],
+        "ifscCodes": [],
     }
     
+    # LLM extraction
     llm_results = extract_intel_with_llm(text, [])
+    
+    # MERGE
+    merged = merge_and_deduplicate(regex_results, advanced_results, llm_results)
     
     return {
         "status": "success",
         "input": text,
-        "normalized_input": text_clean,
         "extraction_methods": {
             "regex": {
                 "upis": len(regex_results["upiIds"]),
@@ -432,8 +475,30 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
                 "results": llm_results
             }
         },
-        "final_normalized_intel": temp_session["intel"],
-        "extraction_metadata": temp_session.get("extraction_metadata", []),
+        "merged_results": {
+            "upis": len(merged["upiIds"]),
+            "phones": len(merged["phoneNumbers"]),
+            "urls": len(merged["phishingLinks"]),
+            "accounts": len(merged["bankAccounts"]),
+            "keywords": len(merged["suspiciousKeywords"]),
+            "names": len(merged.get("names", [])),
+            "emails": len(merged.get("emails", [])),
+            "telegram_handles": len(merged.get("telegramHandles", [])),
+            "scam_category": len(merged.get("scamCategory", [])),
+            "psychological_tactics": len(merged.get("psychologicalTactics", [])),
+            "ifsc_codes": len(merged.get("ifscCodes", [])),
+            "results": merged
+        },
+        "deduplication_stats": {
+            "total_before": {
+                "phones": len(regex_results["phoneNumbers"]) + len(advanced_results["phoneNumbers"]) + len(llm_results.get("phoneNumbers", [])),
+                "urls": len(regex_results["phishingLinks"]) + len(advanced_results["phishingLinks"]) + len(llm_results.get("phishingLinks", []))
+            },
+            "total_after": {
+                "phones": len(merged["phoneNumbers"]),
+                "urls": len(merged["phishingLinks"])
+            }
+        }
     }
 
 
@@ -470,7 +535,13 @@ def debug_intel_score(payload: dict, x_api_key: str = Header(None)):
                 "phoneNumbers": [],
                 "phishingLinks": [],
                 "bankAccounts": [],
-                "suspiciousKeywords": []
+                "suspiciousKeywords": [],
+                "names": [],
+                "emails": [],
+                "telegramHandles": [],
+                "scamCategory": [],
+                "psychologicalTactics": [],
+                "ifscCodes": [],
             }),
             "history": payload.get("history", []),
             "intel_extraction_history": payload.get("intel_extraction_history", [])
@@ -527,7 +598,6 @@ def _interpret_close_reason(reason: str) -> str:
         "hard_limit_reached": "⚠️ Conversation exceeded 30 messages (safety limit)",
         "too_early": "⏳ Too soon to close (minimum 6 messages required)",
         "intel_stagnation": "📉 No new intelligence in last 3 turns, sufficient data collected",
-        "scammer_pressure": "🔴 Scammer repeatedly pressuring, closing strategically",
         "scammer_disengaged": "👋 Scammer showing signs of disengagement, finalizing now",
         "high_quality_complete": "✅ High-quality extraction achieved (score > 0.75)",
         "diminishing_returns": "📊 Good intel collected, but novelty rate declining",
@@ -536,6 +606,75 @@ def _interpret_close_reason(reason: str) -> str:
         "normal_flow": "➡️ Normal conversation flow, no closing signal yet"
     }
     return interpretations.get(reason, f"Unknown reason: {reason}")
+
+
+@app.get("/api/regulatory/evidence/{session_id}")
+def get_evidence_packet(session_id: str, mask_pii: bool = True, x_api_key: str = Header(None)):
+    """
+    📦 EVIDENCE PACKET ENDPOINT: Generate compliance-ready evidence for regulatory filing
+    
+    Returns structured evidence packet for a session including:
+    - Scam summary, risk verdict, conversation timeline
+    - Extracted intelligence artifacts
+    - Closure reason and classification
+    """
+    if x_api_key != API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    session = get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    
+    from datetime import datetime
+    
+    intel = session.get("intel", {})
+    history = session.get("history", [])
+    
+    def _mask(value):
+        if not mask_pii or not value or len(str(value)) <= 4:
+            return value
+        s = str(value)
+        return s[:2] + '*' * (len(s) - 4) + s[-2:]
+
+    # Build timeline
+    timeline = []
+    for i, msg in enumerate(history):
+        timeline.append({
+            "index": i + 1,
+            "role": msg.get("role", "unknown"),
+            "text": msg.get("text", ""),
+            "timestamp": msg.get("timestamp", None),
+        })
+
+    # Build artifacts list
+    artifacts = {}
+    for key, values in intel.items():
+        if isinstance(values, list) and values:
+            artifacts[key] = [_mask(v) if mask_pii else v for v in values]
+
+    evidence = {
+        "session_id": session_id,
+        "generated_at": datetime.now().isoformat(),
+        "classification": {
+            "scam_score": session.get("scam_score", 0.0),
+            "dialogue_state": session.get("dialogue_state", "UNKNOWN"),
+            "last_tactic": session.get("last_tactic", "Unknown"),
+            "hard_trigger": session.get("hard_trigger", False),
+        },
+        "summary": {
+            "total_messages": len(history),
+            "intel_items_extracted": sum(
+                len(v) if isinstance(v, list) else 0
+                for v in intel.values()
+            ),
+            "closure_reason": session.get("close_reason", "N/A"),
+        },
+        "timeline": timeline,
+        "artifacts": artifacts,
+        "pii_masked": mask_pii,
+    }
+    
+    return {"status": "success", "evidence": evidence}
 
 
 if __name__ == "__main__":
