@@ -2,11 +2,12 @@
 Agent module for generating honeypot responses using dialogue strategy.
 """
 
-from intelligence import extract_intel, maybe_finish
+import hashlib
+from intelligence import extract_intel, maybe_finish, store_intel
 from callback import send_final_result
 from dialogue_strategy import execute_strategy, ConversationState
 from defense import defend_against_bot_accusation
-from memory import save_session
+from memory import save_session, append_chat_log
 
 
 SYSTEM_PROMPT = """
@@ -20,69 +21,63 @@ def agent_reply(session_id, session, scammer_text):
     # 1. Extract intelligence
     extract_intel(session, scammer_text)
     
-    # Increment session[message] for history
+    # 2. Increment message counter
     session["messages"] = session.get("messages", 0) + 1
 
-    # 2. Initialize dialogue state if not present
+    # 3. Initialize dialogue state if not present
     if "dialogue_state" not in session:
         session["dialogue_state"] = ConversationState.INIT
         session["state_turn_count"] = 0
 
-    # 2.5. Check for bot accusation and defend if needed
+    # 4. Get reply — either from bot defense OR dialogue strategy
     turn_count = session.get("state_turn_count", 0)
     defense_result = defend_against_bot_accusation(scammer_text, turn_count)
     
     if defense_result:
-        # Bot accusation detected - use defensive response
-        reply, defense_metadata = defense_result
-        
-        # Save session (intelligence was already extracted)
-        save_session(session_id, session)
-        
-        # Defense activated - no need to track extra metadata in simplified schema
-        # Just return the defensive response
-        return reply
-    current_state = session.get("dialogue_state")
-    session["state_turn_count"] = session.get("state_turn_count", 0) + 1
+        reply, _ = defense_result
+    else:
+        # Normal dialogue strategy path
+        session["state_turn_count"] = session.get("state_turn_count", 0) + 1
 
-    # 3. Execute dialogue strategy to get response + next state + metadata
-    reply, next_state, metadata = execute_strategy(session, scammer_text)
+        reply, next_state, metadata = execute_strategy(session, scammer_text)
 
-    # 4. Track state transitions and reset turn count on state change
-    if next_state != session["dialogue_state"]:
-        session["dialogue_state"] = next_state
-        session["state_turn_count"] = 0  # Reset turn count on state change
-    
-    # 5. Update scam score in session for intel_score calculation
-    # (detector should have set this, but ensure it exists)
-    if "scam_score" not in session:
-        session["scam_score"] = 0.5  # Default neutral
+        if next_state != session["dialogue_state"]:
+            session["dialogue_state"] = next_state
+            session["state_turn_count"] = 0
 
+        if "scam_score" not in session:
+            session["scam_score"] = 0.5
 
-    # 6. Append history before finish check
+    # ── Everything below runs for EVERY message (defense or not) ──
+
+    # 5. Append to history
     if "history" not in session:
         session["history"] = []
-    session["history"].append({
-        "sender": "scammer",
-        "text": scammer_text
-    })
-    session["history"].append({
-        "sender": "user",
-        "text": reply
-    })
+    session["history"].append({"sender": "scammer", "text": scammer_text})
+    session["history"].append({"sender": "user", "text": reply})
 
-    # 7. Decide if conversation should finish
+    # 6. Track message hash for deduplication / repeat detection
+    if "message_hashes" not in session:
+        session["message_hashes"] = {}
+    msg_hash = hashlib.sha256(scammer_text.encode()).hexdigest()[:12]
+    session["message_hashes"][msg_hash] = session["message_hashes"].get(msg_hash, 0) + 1
+
+    # 7. Persist chat exchange to Redis list (audit trail)
+    append_chat_log(session_id, scammer_text, reply, session.get("messages", 0))
+
+    # 8. Persist extracted intel snapshot to Redis list
+    store_intel(session_id, session.get("intel", {}))
+
+    # 9. Decide if conversation should finish
     should_finish = maybe_finish(session)
     print("MESSAGES:", session.get("messages"))
     print("INTEL:", session.get("intel"))
     print("FINISH?", should_finish)
     if should_finish:
-        # Mark session as completed so future messages are rejected
         session["completed"] = True
-        # 🚨 MANDATORY GUVI CALLBACK
         send_final_result(session_id, session)
 
-    # 8. Save session back to Redis after all updates
+    # 10. Save session back to Redis after all updates
     save_session(session_id, session)
 
     return reply

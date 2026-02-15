@@ -28,7 +28,11 @@ from normalizer import (
     normalize_url_for_extraction,
     normalize_unicode,
     remove_zero_width,
-    normalize_whitespace
+    remove_control_characters,
+    normalize_homoglyphs,
+    deobfuscate_urls,
+    normalize_whitespace,
+    normalize_phone_for_extraction,
 )
 from telemetry import track_intelligence
 
@@ -179,40 +183,62 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
         }
     
     try:
-        # Import LLM engine (only if available)
-        from llm_engine import _get_llm_client, _call_llm
+        from llm_engine import _get_llm_client
         
-        client = _get_llm_client()
-        if not client:
+        provider_info = _get_llm_client()
+        if not provider_info:
             return {"upiIds": [], "phoneNumbers": [], "phishingLinks": [], 
                     "bankAccounts": [], "suspiciousKeywords": [], "source": "llm_unavailable"}
         
-        # Build extraction prompt
-        system_prompt = """You are an intelligence extraction assistant. Extract the following from the given text:
-1. UPI IDs (format: xyz@bank)
-2. Phone numbers (10-12 digits, any format)
-3. URLs/Links (any format, including obfuscated)
-4. Bank account numbers (8-16 digits)
-5. Suspicious keywords
+        client, model, label = provider_info
+        
+        # Build extraction prompt — strict, no hallucination
+        system_prompt = """You are a strict intelligence extraction assistant. Your job is to extract ONLY items that are EXPLICITLY present in the given text.
+
+RULES:
+- ONLY return items that appear verbatim (or with minor formatting differences) in the text.
+- If a category has NO matching items in the text, return an EMPTY array [].
+- DO NOT infer, guess, or fabricate any values.
+- DO NOT extract email addresses as UPI IDs. UPI IDs end with Indian payment handles like @paytm, @ybl, @okaxis, @upi, @sbi, @hdfcbank etc.
+- Phone numbers must be 10-digit Indian numbers (with optional +91/91 prefix). Do NOT extract random digit sequences.
+- Bank account numbers are 9-18 digit numbers that are NOT phone numbers.
+- URLs must actually appear in the text (even if obfuscated with [.] or spaces).
+- Suspicious keywords: only extract if the word/phrase literally appears in the text.
 
 Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, suspiciousKeywords.
-Each should be an array of strings. Extract ALL instances, even if obfuscated or split.
+Each must be an array of strings. Prefer empty arrays over wrong extractions.
 
-Example:
-{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": [], "suspiciousKeywords": ["urgent", "verify"]}"""
+Example input: "Send money to raj@paytm and call 9876543210"
+Example output: {"upiIds": ["raj@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": [], "bankAccounts": [], "suspiciousKeywords": []}
+
+Example input: "Hello, how are you today?"
+Example output: {"upiIds": [], "phoneNumbers": [], "phishingLinks": [], "bankAccounts": [], "suspiciousKeywords": []}"""
         
-        user_prompt = f"Extract intelligence from this scammer message:\n\n{text}\n\nReturn JSON only."
+        user_prompt = f"Extract intelligence ONLY from items explicitly present in this message. If nothing is found, return empty arrays.\n\nMessage: \"{text}\"\n\nReturn JSON only."
         
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        # Call LLM directly with correct client and model
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=400,
+            temperature=0.1,
+        )
         
-        # Call LLM
-        result = _call_llm(client, messages)
+        content = response.choices[0].message.content.strip()
+        
+        # Strip markdown fences if present
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        
+        result = json.loads(content)
         
         if result and isinstance(result, dict):
-            # Add source indicator
+            # Post-LLM validation: cross-check extracted values against the source text
+            result = _validate_llm_extraction(result, text)
             result["source"] = "llm"
             return result
         else:
@@ -220,9 +246,69 @@ Example:
                     "bankAccounts": [], "suspiciousKeywords": [], "source": "llm_error"}
     
     except Exception as e:
-        # LLM failed, return empty
         return {"upiIds": [], "phoneNumbers": [], "phishingLinks": [], 
                 "bankAccounts": [], "suspiciousKeywords": [], "source": "llm_error"}
+
+
+# ═══════════════════════════════════════════════════════════════
+# POST-LLM VALIDATION (reject hallucinated values)
+# ═══════════════════════════════════════════════════════════════
+
+def _validate_llm_extraction(result: Dict, source_text: str) -> Dict:
+    """
+    Cross-check every LLM-extracted value against the source text.
+    Discard any value whose core content is NOT found in the original message.
+    This prevents hallucinated UPI IDs, phone numbers, etc.
+    """
+    text_lower = source_text.lower()
+    # Digits-only version for numeric lookups
+    text_digits = re.sub(r'\D', '', source_text)
+
+    # --- UPI IDs: the local-part@handle must appear in text ---
+    validated_upis = []
+    for upi in result.get("upiIds", []):
+        if upi.lower() in text_lower:
+            validated_upis.append(upi)
+    result["upiIds"] = validated_upis
+
+    # --- Phone numbers: the digits must appear in the text ---
+    validated_phones = []
+    for phone in result.get("phoneNumbers", []):
+        digits = re.sub(r'\D', '', phone)
+        # Strip leading 91 for matching
+        core = digits[-10:] if len(digits) >= 10 else digits
+        if core and core in text_digits:
+            validated_phones.append(phone)
+    result["phoneNumbers"] = validated_phones
+
+    # --- URLs: domain must appear somewhere in the text ---
+    validated_urls = []
+    for url in result.get("phishingLinks", []):
+        # Extract domain from url
+        domain_match = re.search(r'(?:https?://)?([\w\-\.]+)', url)
+        if domain_match:
+            domain = domain_match.group(1).lower().replace('[.]', '.').replace('(.)', '.')
+            # Check if domain (or obfuscated form) appears in text
+            if domain in text_lower or domain.replace('.', ' . ') in text_lower or domain.replace('.', '[.]') in text_lower:
+                validated_urls.append(url)
+    result["phishingLinks"] = validated_urls
+
+    # --- Bank accounts: digits must appear in text ---
+    validated_accounts = []
+    for acc in result.get("bankAccounts", []):
+        digits = re.sub(r'\D', '', acc)
+        if digits and digits in text_digits:
+            validated_accounts.append(acc)
+    result["bankAccounts"] = validated_accounts
+
+    # --- Keywords: word must appear in text ---
+    validated_keywords = []
+    for kw in result.get("suspiciousKeywords", []):
+        if kw.lower() in text_lower:
+            validated_keywords.append(kw)
+    result["suspiciousKeywords"] = validated_keywords
+
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -307,12 +393,28 @@ def merge_and_deduplicate(
                 merged["phishingLinks"].append(normalized)
     
     # Merge bank accounts (numeric only, avoid phone conflicts)
+    # Collect all phone digits to cross-check
+    all_phone_digits = set()
+    for phone in merged["phoneNumbers"]:
+        d = re.sub(r'\D', '', phone)
+        all_phone_digits.add(d)
+        if d.startswith('91') and len(d) == 12:
+            all_phone_digits.add(d[2:])
+        if len(d) == 10:
+            all_phone_digits.add('91' + d)
+    
     seen_accounts: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
         for account in source.get("bankAccounts", []):
             normalized = normalize_account(account)
-            # Avoid phone numbers (10 digits) being treated as accounts
-            if 8 <= len(normalized) <= 16 and len(normalized) != 10:
+            # Reject if it overlaps with any known phone number
+            if normalized in all_phone_digits:
+                continue
+            # Reject 10-12 digit numbers (almost always phone numbers)
+            if 10 <= len(normalized) <= 12:
+                continue
+            # Valid bank accounts are typically 9-18 digits
+            if 9 <= len(normalized) <= 18:
                 if normalized not in seen_accounts:
                     seen_accounts.add(normalized)
                     merged["bankAccounts"].append(normalized)
@@ -348,10 +450,15 @@ def extract_intel(session, text):
     # STEP 1: REGEX-BASED EXTRACTION (Traditional)
     # ═══════════════════════════════════════════════════════════
     
-    # Light normalization: only remove invisible chars and normalize whitespace
-    text_clean = normalize_unicode(text)
-    text_clean = remove_zero_width(text_clean)
-    text_clean = normalize_whitespace(text_clean)
+    # Extraction-safe normalization: stages 1-4 + 6 + 7
+    # Skips leetspeak (stage 5) because it converts @ → a (destroys UPI IDs)
+    # and converts digits → letters (destroys phone numbers)
+    text_clean = normalize_unicode(text)            # Stage 1: NFKC
+    text_clean = remove_zero_width(text_clean)      # Stage 2: invisible chars
+    text_clean = remove_control_characters(text_clean)  # Stage 3: control chars
+    text_clean = normalize_homoglyphs(text_clean)   # Stage 4: Cyrillic/Greek → Latin
+    text_clean = deobfuscate_urls(text_clean)        # Stage 6: hxxps → https, [.] → .
+    text_clean = normalize_whitespace(text_clean)    # Stage 7: collapse whitespace
     text_lower = text_clean.lower()
     
     regex_results = {
@@ -362,19 +469,46 @@ def extract_intel(session, text):
         "suspiciousKeywords": []
     }
     
-    # Extract UPI IDs
-    regex_results["upiIds"] = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
+    # Extract UPI IDs — only match known Indian UPI handles (not plain emails)
+    _UPI_HANDLES = (
+        'paytm', 'ybl', 'okaxis', 'okhdfcbank', 'oksbi', 'okicici',
+        'upi', 'apl', 'ibl', 'sbi', 'hdfcbank', 'icici', 'axisbank',
+        'axl', 'boi', 'citi', 'citigold', 'dlb', 'fbl', 'federal',
+        'idbi', 'idfcbank', 'indus', 'kbl', 'kotak', 'lvb', 'pnb',
+        'rbl', 'sib', 'uco', 'union', 'vijb', 'abfspay', 'freecharge',
+        'jio', 'airtel', 'postbank', 'waheed', 'slice', 'jupiter',
+        'fi', 'gpay', 'phonepe', 'amazonpay', 'mobikwik', 'niyopay',
+    )
+    _upi_handle_pattern = '|'.join(re.escape(h) for h in _UPI_HANDLES)
+    upi_regex = rf"[a-zA-Z0-9.\-_]{{2,}}@(?:{_upi_handle_pattern})\b"
+    regex_results["upiIds"] = re.findall(upi_regex, text_clean, re.IGNORECASE)
     
     # Extract phone numbers (+91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit)
     regex_results["phoneNumbers"] = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean)
+    
+    # Collect all extracted phone digits (10-digit normalized) to exclude from bank accounts
+    _phone_digits = set()
+    for p in regex_results["phoneNumbers"]:
+        digits = re.sub(r'\D', '', p)
+        if digits.startswith('91') and len(digits) == 12:
+            _phone_digits.add(digits)       # full 12-digit form
+            _phone_digits.add(digits[2:])   # 10-digit form
+        else:
+            _phone_digits.add(digits)
     
     # Extract URLs
     links = re.findall(r"https?://\S+", text_clean)
     regex_results["phishingLinks"] = [link.rstrip('.,;:!?)') for link in links]
     
-    # Extract account numbers (8-16 digits, but not 10-digit phone numbers)
-    accounts = re.findall(r"\b\d{8,16}\b", text_clean)
-    regex_results["bankAccounts"] = [acc for acc in accounts if len(acc) != 10]
+    # Extract bank account numbers (typically 9-18 digits, NOT phone numbers)
+    # Real Indian bank accounts are 9-18 digits; exclude anything that matches a phone number
+    accounts = re.findall(r"\b\d{9,18}\b", text_clean)
+    regex_results["bankAccounts"] = [
+        acc for acc in accounts
+        if acc not in _phone_digits
+        and re.sub(r'\D', '', acc) not in _phone_digits
+        and not (10 <= len(acc) <= 12)   # 10-12 digit numbers are almost certainly phone numbers
+    ]
     
     # Extract keywords
     keywords = [
@@ -449,34 +583,43 @@ def extract_intel(session, text):
     # Update session intel with merged results
     new_counts = {"upi": 0, "phone": 0, "url": 0, "account": 0}
     
-    # Add UPI IDs
+    # Add UPI IDs (normalized: lowercase)
     for upi in merged["upiIds"]:
-        if upi not in session["intel"]["upiIds"]:
-            session["intel"]["upiIds"].append(upi)
+        upi_norm = upi.lower().strip()
+        if upi_norm not in session["intel"]["upiIds"]:
+            session["intel"]["upiIds"].append(upi_norm)
             new_counts["upi"] += 1
     
-    # Add phone numbers
+    # Add phone numbers (normalized: 10 digits only)
     for phone in merged["phoneNumbers"]:
-        if phone not in session["intel"]["phoneNumbers"]:
-            session["intel"]["phoneNumbers"].append(phone)
+        phone_norm = re.sub(r'\D', '', phone)
+        if phone_norm.startswith('91') and len(phone_norm) == 12:
+            phone_norm = phone_norm[2:]
+        if len(phone_norm) == 10 and phone_norm not in session["intel"]["phoneNumbers"]:
+            session["intel"]["phoneNumbers"].append(phone_norm)
             new_counts["phone"] += 1
     
-    # Add URLs
+    # Add URLs (normalized: lowercase, deobfuscated, no trailing slash)
     for url in merged["phishingLinks"]:
-        if url not in session["intel"]["phishingLinks"]:
-            session["intel"]["phishingLinks"].append(url)
+        url_norm = normalize_url_for_extraction(url).rstrip('/')
+        if not url_norm.startswith(('http://', 'https://')):
+            url_norm = 'http://' + url_norm
+        if url_norm not in session["intel"]["phishingLinks"]:
+            session["intel"]["phishingLinks"].append(url_norm)
             new_counts["url"] += 1
     
-    # Add bank accounts
+    # Add bank accounts (normalized: digits only)
     for account in merged["bankAccounts"]:
-        if account not in session["intel"]["bankAccounts"]:
-            session["intel"]["bankAccounts"].append(account)
+        acc_norm = re.sub(r'\D', '', account)
+        if acc_norm and acc_norm not in session["intel"]["bankAccounts"]:
+            session["intel"]["bankAccounts"].append(acc_norm)
             new_counts["account"] += 1
     
-    # Add keywords
+    # Add keywords (normalized: lowercase)
     for keyword in merged["suspiciousKeywords"]:
-        if keyword not in session["intel"]["suspiciousKeywords"]:
-            session["intel"]["suspiciousKeywords"].append(keyword)
+        kw_norm = keyword.lower().strip()
+        if kw_norm and kw_norm not in session["intel"]["suspiciousKeywords"]:
+            session["intel"]["suspiciousKeywords"].append(kw_norm)
     
     # Track telemetry
     if new_counts["upi"] > 0:
@@ -529,7 +672,7 @@ def calculate_intel_score(session: dict) -> dict:
     """
     intel = session.get("intel", {})
     history = session.get("history", [])
-    messages = len(history)
+    messages = session.get("messages", 0)
     
     # ── 1. Unique Artifacts Score (0-1) ────────────────────────
     # Count unique intelligence items across all types
@@ -563,7 +706,7 @@ def calculate_intel_score(session: dict) -> dict:
     
     if messages >= 2:
         # Get last 3 scammer messages (skip user messages)
-        scammer_messages = [msg for msg in history if msg.get("sender") == "assistant"][-3:]
+        scammer_messages = [msg for msg in history if msg.get("sender") == "scammer"][-3:]
         
         if scammer_messages:
             avg_length = sum(len(msg.get("text", "")) for msg in scammer_messages) / len(scammer_messages)
@@ -641,7 +784,7 @@ def detect_scammer_patterns(session: dict) -> dict:
         dict with detected patterns and severity
     """
     history = session.get("history", [])
-    scammer_messages = [msg for msg in history if msg.get("sender") == "assistant"][-5:]
+    scammer_messages = [msg for msg in history if msg.get("sender") == "scammer"][-5:]
     
     patterns = {
         "repeated_pressure": False,

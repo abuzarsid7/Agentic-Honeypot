@@ -6,9 +6,11 @@ Tracks conversation state, extracted intelligence, and dialogue strategy state.
 from dialogue_strategy import ConversationState
 
 import json
+import hashlib
 from redis_client import redis_client
 
 SESSION_TTL = 3600  # 1 hour
+INTEL_TTL = 86400   # 24 hours for intel / chat logs
 
 # Local cache for backwards compatibility (optional)
 sessions = {}
@@ -60,10 +62,8 @@ def get_session(session_id: str):
 def save_session(session_id: str, session: dict):
     """
     Save session to Redis with TTL.
-    
-    Args:
-        session_id: Unique session identifier
-        session: Session dict to persist
+    Also indexes extracted intel artifacts globally for cross-session
+    scammer tracking (phone numbers, UPI IDs, URLs).
     """
     key = f"session:{session_id}"
 
@@ -75,6 +75,53 @@ def save_session(session_id: str, session: dict):
     
     # Update local cache
     sessions[session_id] = session
+
+    # ── Cross-session scammer tracking ─────────────────────────
+    # Index each unique artifact → set of session IDs that saw it
+    intel = session.get("intel", {})
+    for phone in intel.get("phoneNumbers", []):
+        _index_artifact("phone", phone, session_id)
+    for upi in intel.get("upiIds", []):
+        _index_artifact("upi", upi.lower(), session_id)
+    for url in intel.get("phishingLinks", []):
+        _index_artifact("url", url, session_id)
+    for acct in intel.get("bankAccounts", []):
+        _index_artifact("account", acct, session_id)
+
+
+def _index_artifact(artifact_type: str, value: str, session_id: str):
+    """
+    Add session_id to a Redis set keyed by artifact.
+    Enables lookup: "which sessions shared this phone number?"
+    """
+    key = f"artifact:{artifact_type}:{value}"
+    redis_client.sadd(key, session_id)
+    redis_client.expire(key, INTEL_TTL)
+
+
+def get_sessions_for_artifact(artifact_type: str, value: str) -> list:
+    """
+    Look up all session IDs that share a given artifact.
+    Useful for detecting repeated scam attempts.
+    """
+    key = f"artifact:{artifact_type}:{value}"
+    return list(redis_client.smembers(key))
+
+
+def append_chat_log(session_id: str, scammer_text: str, reply: str, turn: int):
+    """
+    Append each message exchange to a Redis list for audit trail.
+    Each entry is a separate JSON object so the full conversation
+    can be reconstructed even if the session dict is lost.
+    """
+    entry = json.dumps({
+        "turn": turn,
+        "scammer": scammer_text,
+        "honeypot": reply,
+    })
+    key = f"chatlog:{session_id}"
+    redis_client.rpush(key, entry)
+    redis_client.expire(key, INTEL_TTL)
 
 
 def update_session(session_id: str, message: dict, reply: str):

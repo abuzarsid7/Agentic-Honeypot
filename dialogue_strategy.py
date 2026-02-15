@@ -25,6 +25,8 @@ Each state defines:
 import re
 import random
 import time
+import os
+import json
 from typing import Dict, List, Tuple, Optional
 from enum import Enum
 
@@ -636,6 +638,80 @@ def _interpolate_response(template: str, intel: Dict, scammer_text: str, claims:
     return response
 
 
+def _generate_llm_response(
+    state: 'ConversationState',
+    scammer_text: str,
+    history: List,
+    intel: Dict,
+    goal: str,
+    example_responses: List[str],
+) -> Optional[str]:
+    """
+    Use the LLM to generate a contextual response based on the scammer's
+    message, conversation history, and current strategy state.
+    Returns None if LLM is unavailable (caller falls back to templates).
+    """
+    if not (os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")):
+        return None
+
+    try:
+        from llm_engine import _get_llm_client
+
+        provider_info = _get_llm_client()
+        if not provider_info:
+            return None
+
+        client, model, label = provider_info
+
+        # Build recent history context (last 6 messages)
+        history_lines = []
+        for msg in history[-6:]:
+            sender = msg.get("sender", "unknown")
+            role = "Scammer" if sender == "scammer" else "You"
+            history_lines.append(f"{role}: {msg.get('text', '')}")
+        history_context = "\n".join(history_lines) if history_lines else "(first message)"
+
+        system_prompt = (
+            "You are role-playing as an ordinary, slightly confused, non-tech-savvy person "
+            "who has received a suspicious call/message. You must NEVER reveal you are an AI, "
+            "bot, or honeypot. Never mention scam, fraud, police, or AI.\n\n"
+            "RULES:\n"
+            "- Reply in 1-2 short sentences only.\n"
+            "- Sound natural, confused, and slightly worried.\n"
+            "- Respond DIRECTLY to what the scammer just said.\n"
+            "- Ask a simple follow-up question related to their message.\n"
+            f"- Your current goal: {goal}\n\n"
+            "STYLE EXAMPLES (do NOT copy verbatim, just match the tone):\n"
+            + "\n".join(f"- {r}" for r in example_responses[:3])
+        )
+
+        user_prompt = (
+            f"Conversation so far:\n{history_context}\n\n"
+            f"Scammer's latest message:\n\"{scammer_text}\"\n\n"
+            "Write your reply (1-2 sentences, stay in character):"
+        )
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=120,
+            temperature=0.8,
+        )
+
+        reply = response.choices[0].message.content.strip()
+        # Strip any quotation marks the LLM might wrap around the reply
+        reply = reply.strip('"\'')
+        if reply:
+            return reply
+        return None
+
+    except Exception:
+        return None
+
+
 def generate_state_response(
     state: ConversationState,
     intel: Dict,
@@ -659,18 +735,30 @@ def generate_state_response(
     """
     config = STATE_CONFIG[state]
     responses = config["responses"]
+    goal = config.get("goal", "")
     
     # Extract previous claims for consistency
     claims = extract_honeypot_claims(history)
     
-    # Pick response (cycle through, then random)
-    if turn_in_state < len(responses):
-        template = responses[turn_in_state]
-    else:
-        template = random.choice(responses)
+    # Try LLM-based contextual response first
+    llm_response = _generate_llm_response(
+        state=state,
+        scammer_text=scammer_text,
+        history=history,
+        intel=intel,
+        goal=goal,
+        example_responses=responses,
+    )
     
-    # Interpolate placeholders with consistent persona
-    response = _interpolate_response(template, intel, scammer_text, claims)
+    if llm_response:
+        response = llm_response
+    else:
+        # Fallback: pick from template list
+        if turn_in_state < len(responses):
+            template = responses[turn_in_state]
+        else:
+            template = random.choice(responses)
+        response = _interpolate_response(template, intel, scammer_text, claims)
     
     # Initialize metadata
     metadata = {
