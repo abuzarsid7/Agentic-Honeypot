@@ -206,6 +206,166 @@ def add_correction(response: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
+# PERSISTENCE / REPETITION DETECTION FROM MEMORY
+# ═══════════════════════════════════════════════════════════════
+
+# Semantic categories a scammer may repeat persistently
+_PERSISTENCE_CATEGORIES = {
+    "payment_demand": [
+        r'\b(send|pay|transfer|deposit|upi|amount|rs|rupees?|₹)\b',
+    ],
+    "link_push": [
+        r'\b(click|link|open|visit|url|website|verify.*(link|site))\b',
+        r'https?://',
+    ],
+    "urgency_threat": [
+        r'\b(urgent|immediately|now|quick|asap|hurry|expire|deadline|today|right\s*now|last\s+chance)\b',
+    ],
+    "authority_pressure": [
+        r'\b(officer|inspector|manager|police|arrest|legal|fir|case|court|government|rbi|suspend|block)\b',
+    ],
+    "credential_request": [
+        r'\b(otp|pin|password|cvv|card\s*number|aadhar|pan|login)\b',
+    ],
+}
+
+
+def detect_repetition_from_memory(session: Dict) -> Dict:
+    """
+    Analyse the conversation memory to detect scammer *persistence*.
+
+    Checks two axes:
+    1. **Exact repetition** – via `message_hashes` (same message sent > 1×).
+    2. **Semantic repetition** – the same *category* of demand appearing
+       in 2+ of the last 4 scammer messages.
+
+    Returns a dict with:
+        is_persistent (bool)  – True if any persistence detected
+        exact_repeats (int)   – number of exactly-repeated messages
+        persistent_categories (list[str]) – categories being repeated
+        pressure_level (float) – 0.0-1.0 severity
+        summary (str)         – human-readable summary for prompt injection
+    """
+    result = {
+        "is_persistent": False,
+        "exact_repeats": 0,
+        "persistent_categories": [],
+        "pressure_level": 0.0,
+        "summary": "",
+    }
+
+    # ── Exact repetition ───────────────────────────────────────
+    hashes = session.get("message_hashes", {})
+    exact_repeats = sum(1 for cnt in hashes.values() if cnt > 1)
+    result["exact_repeats"] = exact_repeats
+
+    # ── Semantic repetition (last 4 scammer messages) ─────────
+    history = session.get("history", [])
+    scammer_msgs = [
+        msg.get("text", "")
+        for msg in history
+        if isinstance(msg, dict) and msg.get("sender") == "scammer"
+    ][-4:]
+
+    if len(scammer_msgs) < 2:
+        return result
+
+    category_hits: Dict[str, int] = {cat: 0 for cat in _PERSISTENCE_CATEGORIES}
+
+    for text in scammer_msgs:
+        text_lower = text.lower()
+        for cat, patterns in _PERSISTENCE_CATEGORIES.items():
+            if any(re.search(p, text_lower) for p in patterns):
+                category_hits[cat] += 1
+
+    repeated_cats = [
+        cat for cat, count in category_hits.items()
+        if count >= 2
+    ]
+
+    result["persistent_categories"] = repeated_cats
+
+    # ── Compute pressure level ─────────────────────────────────
+    pressure = 0.0
+    if exact_repeats > 0:
+        pressure += min(exact_repeats * 0.15, 0.4)
+    pressure += len(repeated_cats) * 0.15
+    # Bonus if urgency + payment together
+    if "urgency_threat" in repeated_cats and "payment_demand" in repeated_cats:
+        pressure += 0.2
+    if "credential_request" in repeated_cats:
+        pressure += 0.15
+    result["pressure_level"] = min(pressure, 1.0)
+
+    result["is_persistent"] = (
+        exact_repeats > 0
+        or len(repeated_cats) > 0
+    )
+
+    # ── Build human-readable summary for the LLM prompt ───────
+    if result["is_persistent"]:
+        parts = []
+        if exact_repeats:
+            parts.append(f"the scammer has sent {exact_repeats} exact-repeat message(s)")
+        if repeated_cats:
+            labels = {
+                "payment_demand": "demanding payment",
+                "link_push": "pushing a link",
+                "urgency_threat": "making urgent threats",
+                "authority_pressure": "claiming authority/legal action",
+                "credential_request": "requesting credentials/OTP",
+            }
+            descs = [labels.get(c, c) for c in repeated_cats]
+            parts.append(f"they keep {', '.join(descs)}")
+        result["summary"] = "The scammer is being persistent: " + "; ".join(parts) + "."
+
+    return result
+
+
+# Responses designed specifically for when persistence is detected.
+# Keyed by the persistence category that is strongest.
+_PERSISTENCE_RESPONSES: Dict[str, List[str]] = {
+    "payment_demand": [
+        "You already told me to pay. I need to think about it, this is a lot of money.",
+        "I heard you the first time about the payment. Let me arrange funds.",
+        "I understand you want me to pay, but I'm still checking with my {person}.",
+        "You keep saying to pay. Can you explain one more time why exactly?",
+        "Please stop rushing me about the money. I need the exact details again.",
+    ],
+    "link_push": [
+        "You already sent me the link. I'm trying to open it but it's slow.",
+        "I saw the link, but my phone is giving a warning. Is there another way?",
+        "I'm having trouble with the link you keep sending. Can you spell the website?",
+        "I clicked the link before but nothing happened. What should I do?",
+    ],
+    "urgency_threat": [
+        "You keep saying it's urgent. But I need to be careful with my money.",
+        "I understand it's urgent, but please don't rush me. I'm confused.",
+        "Every message you send says urgent. That's making me more worried, not faster.",
+        "If it's so urgent, why can't I just visit the branch?",
+    ],
+    "authority_pressure": [
+        "You said you were from {entity} before too. Can you prove it this time?",
+        "You keep mentioning your authority. I just want to verify before I act.",
+        "If you really are an officer, then you'll understand I need time.",
+        "I heard the first time that this is official. But how do I confirm?",
+    ],
+    "credential_request": [
+        "You asked for this information already. I'm scared to share it.",
+        "I'm not comfortable sharing my OTP/PIN again. Is there another way?",
+        "My {person} said never to share OTP with anyone. Why do you need it?",
+        "I already told you I'm not sure about sharing passwords.",
+    ],
+    "_generic": [
+        "You keep repeating the same thing. I need a moment to think.",
+        "I heard you before. Please don't pressure me.",
+        "I understand what you're saying, you told me already. Let me process this.",
+        "You've said this multiple times now. I'm trying my best.",
+    ],
+}
+
+
+# ═══════════════════════════════════════════════════════════════
 # STATE DEFINITIONS
 # ═══════════════════════════════════════════════════════════════
 
@@ -645,6 +805,7 @@ def _generate_llm_response(
     intel: Dict,
     goal: str,
     example_responses: List[str],
+    persistence: Optional[Dict] = None,
 ) -> Optional[str]:
     """
     Use the LLM to generate a contextual response based on the scammer's
@@ -671,6 +832,20 @@ def _generate_llm_response(
             history_lines.append(f"{role}: {msg.get('text', '')}")
         history_context = "\n".join(history_lines) if history_lines else "(first message)"
 
+        # Build persistence-awareness block for the prompt
+        persistence_block = ""
+        if persistence and persistence.get("is_persistent"):
+            persistence_block = (
+                "\n\nIMPORTANT CONTEXT — SCAMMER REPETITION DETECTED:\n"
+                f"{persistence['summary']}\n"
+                "- You have ALREADY heard this demand before. Acknowledge that.\n"
+                "- Do NOT respond as if this is the first time. Reference what they said earlier.\n"
+                "- Show mild frustration or confusion about why they keep repeating themselves.\n"
+                "- Still stay in character as a confused, non-tech-savvy person.\n"
+                "- Use this repeated pressure to extract MORE details: ask why they are rushing you, "
+                "ask for a supervisor, ask for official documentation, or ask them to re-confirm details.\n"
+            )
+
         system_prompt = (
             "You are role-playing as an ordinary, slightly confused, non-tech-savvy person "
             "who has received a suspicious call/message. You must NEVER reveal you are an AI, "
@@ -680,7 +855,8 @@ def _generate_llm_response(
             "- Sound natural, confused, and slightly worried.\n"
             "- Respond DIRECTLY to what the scammer just said.\n"
             "- Ask a simple follow-up question related to their message.\n"
-            f"- Your current goal: {goal}\n\n"
+            f"- Your current goal: {goal}\n"
+            + persistence_block + "\n"
             "STYLE EXAMPLES (do NOT copy verbatim, just match the tone):\n"
             + "\n".join(f"- {r}" for r in example_responses[:3])
         )
@@ -718,6 +894,7 @@ def generate_state_response(
     scammer_text: str,
     turn_in_state: int,
     history: List,
+    persistence: Optional[Dict] = None,
 ) -> Tuple[str, Dict]:
     """
     Generate a response appropriate for the current state with micro-behaviors.
@@ -728,11 +905,16 @@ def generate_state_response(
         scammer_text: Latest scammer message
         turn_in_state: Turn count within current state
         history: Conversation history for consistency
+        persistence: Repetition/persistence detection results from memory
     
     Returns:
         Tuple of (response_string, metadata_dict)
-        metadata includes: delay_seconds, has_typo, has_fear, has_hesitation
+        metadata includes: delay_seconds, has_typo, has_fear, has_hesitation,
+                           persistence_detected, persistence_categories
     """
+    if persistence is None:
+        persistence = {"is_persistent": False}
+
     config = STATE_CONFIG[state]
     responses = config["responses"]
     goal = config.get("goal", "")
@@ -740,7 +922,7 @@ def generate_state_response(
     # Extract previous claims for consistency
     claims = extract_honeypot_claims(history)
     
-    # Try LLM-based contextual response first
+    # Try LLM-based contextual response first (with persistence context)
     llm_response = _generate_llm_response(
         state=state,
         scammer_text=scammer_text,
@@ -748,12 +930,27 @@ def generate_state_response(
         intel=intel,
         goal=goal,
         example_responses=responses,
+        persistence=persistence,
     )
     
     if llm_response:
         response = llm_response
+    elif persistence.get("is_persistent"):
+        # Fallback: use persistence-aware templates when repetition is detected
+        cats = persistence.get("persistent_categories", [])
+        # Pick the best matching category's templates
+        chosen_templates = None
+        for cat in cats:
+            if cat in _PERSISTENCE_RESPONSES:
+                chosen_templates = _PERSISTENCE_RESPONSES[cat]
+                break
+        if not chosen_templates:
+            chosen_templates = _PERSISTENCE_RESPONSES["_generic"]
+
+        template = random.choice(chosen_templates)
+        response = _interpolate_response(template, intel, scammer_text, claims)
     else:
-        # Fallback: pick from template list
+        # Normal fallback: pick from state template list
         if turn_in_state < len(responses):
             template = responses[turn_in_state]
         else:
@@ -767,6 +964,8 @@ def generate_state_response(
         "has_fear": False,
         "has_hesitation": False,
         "has_correction": False,
+        "persistence_detected": persistence.get("is_persistent", False),
+        "persistence_categories": persistence.get("persistent_categories", []),
     }
     
     # Apply micro-behaviors
@@ -818,13 +1017,16 @@ def execute_strategy(session: Dict, scammer_text: str) -> Tuple[str, Conversatio
     
     Returns:
         Tuple of (response_text, new_state, metadata)
-        metadata includes micro-behavior flags and delays
+        metadata includes micro-behavior flags, delays, and persistence info
     """
     # Get current state (default to INIT)
     current_state = session.get("dialogue_state", ConversationState.INIT)
     turn_in_state = session.get("state_turn_count", 0)
     intel = session.get("intel", {})
     history = session.get("history", [])
+    
+    # ── Detect scammer persistence from memory ────────────────
+    persistence = detect_repetition_from_memory(session)
     
     # Determine next state
     next_state = get_next_state(
@@ -840,12 +1042,14 @@ def execute_strategy(session: Dict, scammer_text: str) -> Tuple[str, Conversatio
         turn_in_state = 0
     
     # Generate response for the next state with micro-behaviors
+    # Pass persistence info so response generation is memory-aware
     response, metadata = generate_state_response(
         state=next_state,
         intel=intel,
         scammer_text=scammer_text,
         turn_in_state=turn_in_state,
         history=history,
+        persistence=persistence,
     )
     
     return response, next_state, metadata

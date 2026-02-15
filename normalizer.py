@@ -3,19 +3,23 @@ Production-Grade Text Normalization Engine
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Purpose: Eliminate scammer obfuscation techniques before detection
-Architecture: 8-stage deterministic pipeline
-Performance: ~0.1ms per message
-Security: No eval(), no exec(), no external calls
+Architecture: 10-stage deterministic pipeline
+Security: No eval(), no exec()
 
 Pipeline Flow:
 Raw Input → Unicode → Zero-Width → Control Chars → Homoglyphs → 
-Leetspeak → URL Deobfuscation → Whitespace → Lowercase → Output
+Leetspeak → Char-Spacing → URL Deobfuscation → Short-URL Expansion →
+Whitespace → Lowercase → Output
 """
 
 import re
+import logging
 import unicodedata
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from functools import lru_cache
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+import requests
 
 # ═══════════════════════════════════════════════════════════════
 # PRECOMPILED PATTERNS (Performance Optimization)
@@ -40,6 +44,50 @@ URL_DETECTION_PATTERN = re.compile(
 
 # Digit sequences (for phone number normalization)
 PHONE_PATTERN = re.compile(r'[-\s().]')
+
+# Character-spacing obfuscation: sequences of single chars separated by spaces
+# Matches runs of 4+ single-character tokens like "h t t p : / / s b i . c o m"
+CHAR_SPACING_PATTERN = re.compile(
+    r'(?:^|(?<=\s))'
+    r'((?:[^\s]\s){3,}[^\s])'
+    r'(?=\s|$)',
+)
+
+# Full URL pattern (used for shortened URL detection)
+FULL_URL_PATTERN = re.compile(
+    r'https?://[^\s<>"\')]+',
+    re.IGNORECASE,
+)
+
+# ═══════════════════════════════════════════════════════════════
+# SHORTENED URL CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+
+# Known URL shortener domains — kept as a frozenset for O(1) lookups
+SHORTENER_DOMAINS: frozenset = frozenset({
+    # Major shorteners
+    "bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly",
+    "is.gd", "v.gd", "buff.ly", "adf.ly", "j.mp",
+    "rb.gy", "short.io", "cutt.ly", "shorturl.at", "clck.ru",
+    "lnkd.in", "db.tt", "qr.ae", "amzn.to", "youtu.be",
+    "surl.li", "rebrand.ly", "bl.ink", "tiny.cc", "x.co",
+    # Social / common services
+    "fb.me", "m.me", "wa.me", "redd.it", "dlvr.it",
+    "soo.gd", "s2r.co", "clk.sh", "cli.re", "bc.vc",
+    "po.st", "su.pr", "u.to", "mcaf.ee", "twit.ac",
+    "href.li", "han.gl", "hyperurl.co", "bom.to", "zpr.io",
+    # Regional / niche
+    "shrtco.de", "0rz.tw", "b23.ru", "gee.su", "dwz.mk",
+})
+
+# Default timeout (seconds) for following redirects when expanding short URLs
+SHORTENED_URL_EXPAND_TIMEOUT: float = 3.0
+
+# Maximum number of redirects to follow
+SHORTENED_URL_MAX_REDIRECTS: int = 10
+
+# Logger
+_log = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════
 # LEETSPEAK & OBFUSCATION MAPS
@@ -340,7 +388,36 @@ def normalize_leetspeak(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 6: URL Deobfuscation
+# STAGE 6: Character-Spacing Deobfuscation
+# ═══════════════════════════════════════════════════════════════
+
+def deobfuscate_char_spacing(text: str) -> str:
+    """
+    Collapse character-spacing obfuscation where scammers insert spaces
+    between every character to evade pattern matching.
+
+    Example:
+        "h t t p : / / s b i - l o g i n . x y z" → "http://sbi-login.xyz"
+        "s e n d m o n e y" → "sendmoney"
+
+    Only collapses runs of 4+ single-character tokens to avoid
+    breaking normal short words.
+    """
+    def _collapse(match: re.Match) -> str:
+        fragment = match.group(1)
+        # Only collapse if most tokens are single characters
+        tokens = fragment.split(' ')
+        single_char_count = sum(1 for t in tokens if len(t) == 1)
+        # At least 70% single chars and minimum 4 tokens
+        if len(tokens) >= 4 and single_char_count / len(tokens) >= 0.7:
+            return ''.join(tokens)
+        return fragment
+
+    return CHAR_SPACING_PATTERN.sub(_collapse, text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# STAGE 7: URL Deobfuscation
 # ═══════════════════════════════════════════════════════════════
 
 def deobfuscate_urls(text: str) -> str:
@@ -367,7 +444,135 @@ def deobfuscate_urls(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 7: Whitespace Normalization
+# STAGE 8: Shortened URL Expansion
+# ═══════════════════════════════════════════════════════════════
+
+def _is_shortened_url(url: str) -> bool:
+    """
+    Determine whether *url* points to a known URL shortener.
+
+    Checks the hostname (case-insensitive) against SHORTENER_DOMAINS.
+    Also catches very short path-only URLs (e.g. bit.ly/abc).
+    """
+    try:
+        # Strip protocol
+        without_proto = re.sub(r'^https?://', '', url, flags=re.IGNORECASE)
+        host = without_proto.split('/')[0].split('?')[0].split('#')[0].lower()
+        return host in SHORTENER_DOMAINS
+    except Exception:
+        return False
+
+
+def _expand_single_url(
+    url: str,
+    timeout: float = SHORTENED_URL_EXPAND_TIMEOUT,
+    max_redirects: int = SHORTENED_URL_MAX_REDIRECTS,
+) -> str:
+    """
+    Expand a single shortened URL by following redirects.
+
+    Performs a HEAD request (fast, no body downloaded) with
+    ``allow_redirects=True`` and returns the final resolved URL.
+    Falls back to the original URL on any error or timeout.
+
+    Args:
+        url: The shortened URL to expand.
+        timeout: Per-request timeout in seconds.
+        max_redirects: Maximum redirect hops.
+
+    Returns:
+        The expanded URL, or the original on failure.
+    """
+    try:
+        session = requests.Session()
+        session.max_redirects = max_redirects
+        response = session.head(
+            url,
+            allow_redirects=True,
+            timeout=timeout,
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        final_url = response.url
+        if final_url and final_url != url:
+            _log.debug("Expanded shortened URL: %s -> %s", url, final_url)
+            return final_url
+    except requests.exceptions.Timeout:
+        _log.warning("Timeout expanding shortened URL: %s", url)
+    except requests.exceptions.TooManyRedirects:
+        _log.warning("Too many redirects for shortened URL: %s", url)
+    except requests.exceptions.RequestException as exc:
+        _log.debug("Failed to expand shortened URL %s: %s", url, exc)
+    except Exception as exc:  # pragma: no cover — safety net
+        _log.debug("Unexpected error expanding URL %s: %s", url, exc)
+    return url
+
+
+def expand_shortened_urls(
+    text: str,
+    timeout: float = SHORTENED_URL_EXPAND_TIMEOUT,
+    max_workers: int = 4,
+) -> str:
+    """
+    Detect and expand shortened URLs in *text*.
+
+    Scammers frequently use URL shorteners to hide malicious destinations.
+    This stage:
+    1. Finds all URLs in the text.
+    2. Checks each against a list of known shortener domains.
+    3. Expands matching URLs in parallel (with per-URL timeout).
+    4. Replaces the shortened URLs with their expanded forms.
+
+    Args:
+        text: Input text potentially containing shortened URLs.
+        timeout: Timeout per URL expansion (seconds).
+        max_workers: Max threads for parallel expansion.
+
+    Returns:
+        Text with shortened URLs replaced by their expanded destinations.
+    """
+    urls = FULL_URL_PATTERN.findall(text)
+    if not urls:
+        return text
+
+    short_urls = [url for url in urls if _is_shortened_url(url)]
+    if not short_urls:
+        return text
+
+    # De-duplicate while preserving order
+    seen: Set[str] = set()
+    unique_short: List[str] = []
+    for u in short_urls:
+        if u not in seen:
+            seen.add(u)
+            unique_short.append(u)
+
+    # Expand in parallel with a thread pool for I/O-bound work
+    expanded_map: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(unique_short))) as pool:
+        futures = {
+            pool.submit(_expand_single_url, u, timeout): u
+            for u in unique_short
+        }
+        for future in futures:
+            original = futures[future]
+            try:
+                expanded_map[original] = future.result(timeout=timeout + 2)
+            except FuturesTimeoutError:
+                _log.warning("Thread-level timeout expanding: %s", original)
+                expanded_map[original] = original
+            except Exception:
+                expanded_map[original] = original
+
+    # Substitute expanded URLs back into the text
+    for short, expanded in expanded_map.items():
+        if expanded != short:
+            text = text.replace(short, expanded)
+
+    return text
+
+
+# ═══════════════════════════════════════════════════════════════
+# STAGE 9: Whitespace Normalization
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_whitespace(text: str) -> str:
@@ -383,7 +588,7 @@ def normalize_whitespace(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 8: Phone Number Normalization (Helper)
+# STAGE 10: Phone Number Normalization (Helper)
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_phone_number(text: str) -> str:
@@ -399,17 +604,18 @@ def normalize_phone_number(text: str) -> str:
 # MAIN NORMALIZATION ENTRY POINT
 # ═══════════════════════════════════════════════════════════════
 
-def normalize_input(text: str) -> str:
+def normalize_input(text: str, expand_urls: bool = True) -> str:
     """
-    Production-grade 8-stage normalization pipeline.
+    Production-grade 9-stage normalization pipeline.
     
     ✅ Deterministic (same input → same output)
     ✅ Idempotent (running twice = same result)
-    ✅ Fast (~0.1ms per message)
     ✅ Safe (no eval, no exec)
     
     Args:
         text: Raw user input (potentially obfuscated)
+        expand_urls: Whether to expand shortened URLs (requires network).
+                     Set to False when offline or for fastest processing.
     
     Returns:
         Normalized, lowercase, clean text ready for detection
@@ -433,9 +639,12 @@ def normalize_input(text: str) -> str:
     text = remove_control_characters(text)      # Stage 3
     text = normalize_homoglyphs(text)           # Stage 4
     text = normalize_leetspeak(text)            # Stage 5
-    text = deobfuscate_urls(text)               # Stage 6
-    text = normalize_whitespace(text)           # Stage 7
-    text = text.lower()                         # Stage 8
+    text = deobfuscate_char_spacing(text)       # Stage 6
+    text = deobfuscate_urls(text)               # Stage 7
+    if expand_urls:                             # Stage 8
+        text = expand_shortened_urls(text)
+    text = normalize_whitespace(text)           # Stage 9
+    text = text.lower()                         # Stage 10
     
     return text
 
@@ -510,14 +719,20 @@ def get_normalization_report(text: str) -> Dict[str, str]:
     current = normalize_leetspeak(current)
     report["stage5_leetspeak"] = current
     
+    current = deobfuscate_char_spacing(current)
+    report["stage6_char_spacing"] = current
+    
     current = deobfuscate_urls(current)
-    report["stage6_urls"] = current
+    report["stage7_urls"] = current
+    
+    current = expand_shortened_urls(current)
+    report["stage8_short_urls"] = current
     
     current = normalize_whitespace(current)
-    report["stage7_whitespace"] = current
+    report["stage9_whitespace"] = current
     
     current = current.lower()
-    report["stage8_final"] = current
+    report["stage10_final"] = current
     
     return report
 

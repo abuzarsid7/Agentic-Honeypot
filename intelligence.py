@@ -30,7 +30,9 @@ from normalizer import (
     remove_zero_width,
     remove_control_characters,
     normalize_homoglyphs,
+    deobfuscate_char_spacing,
     deobfuscate_urls,
+    expand_shortened_urls,
     normalize_whitespace,
     normalize_phone_for_extraction,
 )
@@ -44,13 +46,17 @@ from telemetry import track_intelligence
 def extract_obfuscated_urls(text: str) -> List[str]:
     """
     Extract URLs with obfuscation techniques:
+    - Character-spaced: "h t t p : / / s b i . c o m"
     - hxxp/hxxps instead of http/https
     - [.] or (.) or [dot] instead of .
     - Spelled out: "google dot com slash phish"
     - Spaces: "example . com"
     """
     urls = []
-    text_lower = text.lower()
+
+    # Pre-process: collapse character-spacing obfuscation first
+    text_collapsed = deobfuscate_char_spacing(text)
+    text_lower = text_collapsed.lower()
     
     # Pattern 1: hxxp/hxxps URLs
     hxxp_urls = re.findall(r'hxxps?://[\w\-\.\[\]\(\)]+', text_lower)
@@ -71,7 +77,7 @@ def extract_obfuscated_urls(text: str) -> List[str]:
     spelled_urls = re.findall(spelled_pattern, text, re.IGNORECASE)
     for match in spelled_urls:
         domain, tld, path = match
-        url = f"http://{domain}.{tld}"
+        url = f"{domain}.{tld}"
         if path:
             url += f"/{path}"
         urls.append(url)
@@ -83,7 +89,7 @@ def extract_obfuscated_urls(text: str) -> List[str]:
         domain, tld, path = match
         # Avoid false positives (like "5. com" or common phrases)
         if len(domain) > 2 and tld in ['com', 'net', 'org', 'in', 'co', 'io', 'app']:
-            url = f"http://{domain}.{tld}"
+            url = f"{domain}.{tld}"
             if path:
                 url += f"/{path}"
             urls.append(url)
@@ -331,14 +337,36 @@ def normalize_upi_id(upi: str) -> str:
 
 
 def normalize_url(url: str) -> str:
-    """Normalize URL for deduplication."""
+    """Normalize URL for deduplication.
+    
+    Handles:
+    - Double protocols: http://https://x.com → https://x.com
+    - Protocol-agnostic dedup: http://x.com and https://x.com → same key
+    - Trailing slashes, whitespace, trailing punctuation
+    """
     url = url.lower().strip()
+    # Strip trailing punctuation that may have been captured
+    url = url.rstrip('.,;:!?)')
     # Remove trailing slashes
     url = url.rstrip('/')
+
+    # Fix double-protocol URLs (e.g. http://https://site.com)
+    double_proto = re.match(r'^https?://(?:https?://)', url)
+    if double_proto:
+        # Keep the inner (real) protocol
+        url = re.sub(r'^https?://(https?://)', r'\1', url)
+
     # Ensure http/https prefix
     if not url.startswith(('http://', 'https://')):
         url = 'http://' + url
+
     return url
+
+
+def _url_dedup_key(url: str) -> str:
+    """Return a protocol-agnostic key so http:// and https:// variants
+    of the same URL are treated as duplicates."""
+    return re.sub(r'^https?://', '', url)
 
 
 def normalize_account(account: str) -> str:
@@ -383,13 +411,14 @@ def merge_and_deduplicate(
                 seen_phones.add(normalized)
                 merged["phoneNumbers"].append(normalized)
     
-    # Merge URLs (normalize and dedup)
+    # Merge URLs (normalize and dedup, protocol-agnostic)
     seen_urls: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
         for url in source.get("phishingLinks", []):
             normalized = normalize_url(url)
-            if normalized not in seen_urls:
-                seen_urls.add(normalized)
+            key = _url_dedup_key(normalized)
+            if key not in seen_urls:
+                seen_urls.add(key)
                 merged["phishingLinks"].append(normalized)
     
     # Merge bank accounts (numeric only, avoid phone conflicts)
@@ -450,15 +479,17 @@ def extract_intel(session, text):
     # STEP 1: REGEX-BASED EXTRACTION (Traditional)
     # ═══════════════════════════════════════════════════════════
     
-    # Extraction-safe normalization: stages 1-4 + 6 + 7
+    # Extraction-safe normalization: stages 1-4 + 6-9
     # Skips leetspeak (stage 5) because it converts @ → a (destroys UPI IDs)
     # and converts digits → letters (destroys phone numbers)
     text_clean = normalize_unicode(text)            # Stage 1: NFKC
     text_clean = remove_zero_width(text_clean)      # Stage 2: invisible chars
     text_clean = remove_control_characters(text_clean)  # Stage 3: control chars
     text_clean = normalize_homoglyphs(text_clean)   # Stage 4: Cyrillic/Greek → Latin
-    text_clean = deobfuscate_urls(text_clean)        # Stage 6: hxxps → https, [.] → .
-    text_clean = normalize_whitespace(text_clean)    # Stage 7: collapse whitespace
+    text_clean = deobfuscate_char_spacing(text_clean)  # Stage 6: h t t p → http
+    text_clean = deobfuscate_urls(text_clean)        # Stage 7: hxxps → https, [.] → .
+    text_clean = expand_shortened_urls(text_clean)   # Stage 8: bit.ly → real URL
+    text_clean = normalize_whitespace(text_clean)    # Stage 9: collapse whitespace
     text_lower = text_clean.lower()
     
     regex_results = {
@@ -600,11 +631,21 @@ def extract_intel(session, text):
             new_counts["phone"] += 1
     
     # Add URLs (normalized: lowercase, deobfuscated, no trailing slash)
+    # Build a set of protocol-agnostic keys for existing session URLs
+    _existing_url_keys = set()
+    for existing in session["intel"]["phishingLinks"]:
+        _existing_url_keys.add(re.sub(r'^https?://', '', existing.lower().rstrip('/')))
+
     for url in merged["phishingLinks"]:
         url_norm = normalize_url_for_extraction(url).rstrip('/')
+        # Fix double-protocol (e.g. http://https://site.com)
+        url_norm = re.sub(r'^https?://(https?://)', r'\1', url_norm)
         if not url_norm.startswith(('http://', 'https://')):
             url_norm = 'http://' + url_norm
-        if url_norm not in session["intel"]["phishingLinks"]:
+        # Protocol-agnostic dedup against session
+        url_key = re.sub(r'^https?://', '', url_norm)
+        if url_key not in _existing_url_keys:
+            _existing_url_keys.add(url_key)
             session["intel"]["phishingLinks"].append(url_norm)
             new_counts["url"] += 1
     

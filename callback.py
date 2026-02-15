@@ -16,6 +16,16 @@ def send_final_result(session_id, session):
         "agentNotes": notes
     }
     
+    print(f"\n{'='*60}")
+    print(f"📤 CALLBACK PAYLOAD for session {session_id}:")
+    print(f"   Messages Exchanged: {payload['totalMessagesExchanged']}")
+    print(f"   Extracted Intelligence:")
+    for key, value in payload['extractedIntelligence'].items():
+        print(f"     • {key}: {value}")
+    print(f"   Agent Notes: {payload['agentNotes']}")
+    print(f"   Endpoint: https://hackathon.guvi.in/api/updateHoneyPotFinalResult")
+    print(f"{'='*60}\n")
+
     try:
         response = requests.post(
             "https://hackathon.guvi.in/api/updateHoneyPotFinalResult",

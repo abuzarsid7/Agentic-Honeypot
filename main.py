@@ -217,7 +217,7 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
     """
     🔍 DEBUG ENDPOINT: Show normalization pipeline stages
     
-    Returns detailed report of how text transforms through 8 stages.
+    Returns detailed report of how text transforms through 10 stages.
     Useful for demo and debugging obfuscation attacks.
     """
     if x_api_key != API_KEY:
@@ -233,16 +233,18 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
         "status": "success",
         "input": text,
         "stages": report,
-        "final": report["stage8_final"],
+        "final": report["stage10_final"],
         "transformations": {
             "unicode_changed": report["original"] != report["stage1_unicode"],
             "zero_width_removed": report["stage1_unicode"] != report["stage2_zero_width"],
             "control_chars_removed": report["stage2_zero_width"] != report["stage3_control_chars"],
             "homoglyphs_normalized": report["stage3_control_chars"] != report["stage4_homoglyphs"],
             "leetspeak_converted": report["stage4_homoglyphs"] != report["stage5_leetspeak"],
-            "urls_deobfuscated": report["stage5_leetspeak"] != report["stage6_urls"],
-            "whitespace_normalized": report["stage6_urls"] != report["stage7_whitespace"],
-            "lowercased": report["stage7_whitespace"] != report["stage8_final"]
+            "char_spacing_collapsed": report["stage5_leetspeak"] != report["stage6_char_spacing"],
+            "urls_deobfuscated": report["stage6_char_spacing"] != report["stage7_urls"],
+            "short_urls_expanded": report["stage7_urls"] != report["stage8_short_urls"],
+            "whitespace_normalized": report["stage8_short_urls"] != report["stage9_whitespace"],
+            "lowercased": report["stage9_whitespace"] != report["stage10_final"]
         }
     }
 

@@ -41,6 +41,11 @@ def agent_reply(session_id, session, scammer_text):
 
         reply, next_state, metadata = execute_strategy(session, scammer_text)
 
+        # Store micro-behavior metadata for /debug/strategy visibility
+        if "response_metadata" not in session:
+            session["response_metadata"] = []
+        session["response_metadata"].append(metadata)
+
         if next_state != session["dialogue_state"]:
             session["dialogue_state"] = next_state
             session["state_turn_count"] = 0

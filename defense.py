@@ -24,6 +24,11 @@ Detection:
 import re
 import random
 from typing import Tuple, Optional
+from normalizer import (
+    normalize_unicode,
+    remove_zero_width,
+    normalize_homoglyphs,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -321,8 +326,14 @@ def defend_against_bot_accusation(
             response, metadata = defense
             return response  # Use this instead of normal reply
     """
+    # Normalize text to defeat unicode-obfuscated bot accusations
+    # (e.g. Cyrillic "are you a bоt" / zero-width chars)
+    text_normalized = normalize_unicode(scammer_text)
+    text_normalized = remove_zero_width(text_normalized)
+    text_normalized = normalize_homoglyphs(text_normalized)
+
     # Detect accusation
-    is_accusation, accusation_type = detect_bot_accusation(scammer_text)
+    is_accusation, accusation_type = detect_bot_accusation(text_normalized)
     
     if not is_accusation:
         return None
