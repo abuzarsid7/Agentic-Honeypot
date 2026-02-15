@@ -7,7 +7,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [ended, setEnded] = useState(false);
-  const sessionId = useRef("demo-session-13");
+  const sessionId = useRef("demo-sessions-15");
   const chatRef = useRef(null);
 
   const sendMessage = async () => {
@@ -100,18 +100,18 @@ const styles = {
   chat: {
     height: "400px",
     overflowY: "auto",
-    border: "1px solid #ccc",
+    border: "1px solid #fff",
     padding: "10px",
     marginBottom: "10px",
   },
   scammer: {
-    background: "#ffe6e6",
+    background: "#00008B",
     padding: "8px",
     margin: "5px 0",
     borderRadius: "5px",
   },
   honeypot: {
-    background: "#e6f7ff",
+    background: "#08b1ff",
     padding: "8px",
     margin: "5px 0",
     borderRadius: "5px",

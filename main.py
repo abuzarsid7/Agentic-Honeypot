@@ -233,18 +233,19 @@ def debug_normalization(payload: dict, x_api_key: str = Header(None)):
         "status": "success",
         "input": text,
         "stages": report,
-        "final": report["stage10_final"],
+        "final": report["stage11_final"],
         "transformations": {
             "unicode_changed": report["original"] != report["stage1_unicode"],
             "zero_width_removed": report["stage1_unicode"] != report["stage2_zero_width"],
             "control_chars_removed": report["stage2_zero_width"] != report["stage3_control_chars"],
             "homoglyphs_normalized": report["stage3_control_chars"] != report["stage4_homoglyphs"],
-            "leetspeak_converted": report["stage4_homoglyphs"] != report["stage5_leetspeak"],
-            "char_spacing_collapsed": report["stage5_leetspeak"] != report["stage6_char_spacing"],
-            "urls_deobfuscated": report["stage6_char_spacing"] != report["stage7_urls"],
-            "short_urls_expanded": report["stage7_urls"] != report["stage8_short_urls"],
-            "whitespace_normalized": report["stage8_short_urls"] != report["stage9_whitespace"],
-            "lowercased": report["stage9_whitespace"] != report["stage10_final"]
+            "hex_urls_decoded": report["stage4_homoglyphs"] != report["stage5_hex_urls"],
+            "leetspeak_converted": report["stage5_hex_urls"] != report["stage6_leetspeak"],
+            "char_spacing_collapsed": report["stage6_leetspeak"] != report["stage7_char_spacing"],
+            "urls_deobfuscated": report["stage7_char_spacing"] != report["stage8_urls"],
+            "short_urls_expanded": report["stage8_urls"] != report["stage9_short_urls"],
+            "whitespace_normalized": report["stage9_short_urls"] != report["stage10_whitespace"],
+            "lowercased": report["stage10_whitespace"] != report["stage11_final"]
         }
     }
 
@@ -349,16 +350,20 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
     from normalizer import (
         normalize_unicode, remove_zero_width,
         remove_control_characters, normalize_homoglyphs,
-        deobfuscate_urls, normalize_whitespace
+        decode_hex_urls, deobfuscate_char_spacing,
+        deobfuscate_urls, expand_shortened_urls, normalize_whitespace
     )
     import re
     
-    # Extraction-safe normalization (same as extract_intel)
+    # Extraction-safe normalization (same as extract_intel: stages 1-5 + 7-10)
     text_clean = normalize_unicode(text)
     text_clean = remove_zero_width(text_clean)
     text_clean = remove_control_characters(text_clean)
     text_clean = normalize_homoglyphs(text_clean)
+    text_clean = decode_hex_urls(text_clean)
+    text_clean = deobfuscate_char_spacing(text_clean)
     text_clean = deobfuscate_urls(text_clean)
+    text_clean = expand_shortened_urls(text_clean)
     text_clean = normalize_whitespace(text_clean)
     text_lower = text_clean.lower()
     
@@ -388,7 +393,7 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
         "upiIds": re.findall(upi_regex, text_clean, re.IGNORECASE),
         "phoneNumbers": re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean),
         "phishingLinks": [link.rstrip('.,;:!?)') for link in re.findall(r"https?://\S+", text_clean)],
-        "bankAccounts": [acc for acc in re.findall(r"\b\d{9,18}\b", text_clean) if not (10 <= len(acc) <= 12)],
+        "bankAccounts": [acc for acc in re.findall(r"\b\d{9,18}\b", text_clean)],
         "suspiciousKeywords": [kw for kw in ['upi', 'verify', 'urgent', 'blocked', 'otp', 'cvv'] if kw in text_lower]
     }
     

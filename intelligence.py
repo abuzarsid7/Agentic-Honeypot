@@ -31,6 +31,7 @@ from normalizer import (
     remove_control_characters,
     normalize_homoglyphs,
     deobfuscate_char_spacing,
+    decode_hex_urls,
     deobfuscate_urls,
     expand_shortened_urls,
     normalize_whitespace,
@@ -56,6 +57,8 @@ def extract_obfuscated_urls(text: str) -> List[str]:
 
     # Pre-process: collapse character-spacing obfuscation first
     text_collapsed = deobfuscate_char_spacing(text)
+    # Pre-process: decode hex-encoded URLs
+    text_collapsed = decode_hex_urls(text_collapsed)
     text_lower = text_collapsed.lower()
     
     # Pattern 1: hxxp/hxxps URLs
@@ -340,11 +343,15 @@ def normalize_url(url: str) -> str:
     """Normalize URL for deduplication.
     
     Handles:
+    - Hex-encoded URLs: 687474703a2f2f... → http://...
     - Double protocols: http://https://x.com → https://x.com
     - Protocol-agnostic dedup: http://x.com and https://x.com → same key
     - Trailing slashes, whitespace, trailing punctuation
     """
-    url = url.lower().strip()
+    url = url.strip()
+    # Decode hex-encoded URLs before any other normalization
+    url = decode_hex_urls(url)
+    url = url.lower()
     # Strip trailing punctuation that may have been captured
     url = url.rstrip('.,;:!?)')
     # Remove trailing slashes
@@ -439,9 +446,6 @@ def merge_and_deduplicate(
             # Reject if it overlaps with any known phone number
             if normalized in all_phone_digits:
                 continue
-            # Reject 10-12 digit numbers (almost always phone numbers)
-            if 10 <= len(normalized) <= 12:
-                continue
             # Valid bank accounts are typically 9-18 digits
             if 9 <= len(normalized) <= 18:
                 if normalized not in seen_accounts:
@@ -479,17 +483,18 @@ def extract_intel(session, text):
     # STEP 1: REGEX-BASED EXTRACTION (Traditional)
     # ═══════════════════════════════════════════════════════════
     
-    # Extraction-safe normalization: stages 1-4 + 6-9
-    # Skips leetspeak (stage 5) because it converts @ → a (destroys UPI IDs)
+    # Extraction-safe normalization: stages 1-5 + 7-10
+    # Skips leetspeak (stage 6) because it converts @ → a (destroys UPI IDs)
     # and converts digits → letters (destroys phone numbers)
     text_clean = normalize_unicode(text)            # Stage 1: NFKC
     text_clean = remove_zero_width(text_clean)      # Stage 2: invisible chars
     text_clean = remove_control_characters(text_clean)  # Stage 3: control chars
     text_clean = normalize_homoglyphs(text_clean)   # Stage 4: Cyrillic/Greek → Latin
-    text_clean = deobfuscate_char_spacing(text_clean)  # Stage 6: h t t p → http
-    text_clean = deobfuscate_urls(text_clean)        # Stage 7: hxxps → https, [.] → .
-    text_clean = expand_shortened_urls(text_clean)   # Stage 8: bit.ly → real URL
-    text_clean = normalize_whitespace(text_clean)    # Stage 9: collapse whitespace
+    text_clean = decode_hex_urls(text_clean)          # Stage 5: hex → URL
+    text_clean = deobfuscate_char_spacing(text_clean)  # Stage 7: h t t p → http
+    text_clean = deobfuscate_urls(text_clean)        # Stage 8: hxxps → https, [.] → .
+    text_clean = expand_shortened_urls(text_clean)   # Stage 9: bit.ly → real URL
+    text_clean = normalize_whitespace(text_clean)    # Stage 10: collapse whitespace
     text_lower = text_clean.lower()
     
     regex_results = {
@@ -532,13 +537,12 @@ def extract_intel(session, text):
     regex_results["phishingLinks"] = [link.rstrip('.,;:!?)') for link in links]
     
     # Extract bank account numbers (typically 9-18 digits, NOT phone numbers)
-    # Real Indian bank accounts are 9-18 digits; exclude anything that matches a phone number
+    # Cross-check against actually-extracted phone numbers instead of blanket length filter
     accounts = re.findall(r"\b\d{9,18}\b", text_clean)
     regex_results["bankAccounts"] = [
         acc for acc in accounts
         if acc not in _phone_digits
         and re.sub(r'\D', '', acc) not in _phone_digits
-        and not (10 <= len(acc) <= 12)   # 10-12 digit numbers are almost certainly phone numbers
     ]
     
     # Extract keywords
@@ -638,6 +642,8 @@ def extract_intel(session, text):
 
     for url in merged["phishingLinks"]:
         url_norm = normalize_url_for_extraction(url).rstrip('/')
+        # Decode hex-encoded URLs
+        url_norm = decode_hex_urls(url_norm)
         # Fix double-protocol (e.g. http://https://site.com)
         url_norm = re.sub(r'^https?://(https?://)', r'\1', url_norm)
         if not url_norm.startswith(('http://', 'https://')):

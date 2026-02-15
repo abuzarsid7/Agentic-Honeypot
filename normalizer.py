@@ -3,13 +3,13 @@ Production-Grade Text Normalization Engine
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Purpose: Eliminate scammer obfuscation techniques before detection
-Architecture: 10-stage deterministic pipeline
+Architecture: 11-stage deterministic pipeline
 Security: No eval(), no exec()
 
 Pipeline Flow:
 Raw Input → Unicode → Zero-Width → Control Chars → Homoglyphs → 
-Leetspeak → Char-Spacing → URL Deobfuscation → Short-URL Expansion →
-Whitespace → Lowercase → Output
+Hex-URL Decode → Leetspeak → Char-Spacing → URL Deobfuscation →
+Short-URL Expansion → Whitespace → Lowercase → Output
 """
 
 import re
@@ -51,6 +51,12 @@ CHAR_SPACING_PATTERN = re.compile(
     r'(?:^|(?<=\s))'
     r'((?:[^\s]\s){3,}[^\s])'
     r'(?=\s|$)',
+)
+
+# Hex-encoded URL pattern: continuous hex strings (≥14 hex chars = 7+ bytes)
+# 687474703a2f2f = "http://" in hex, so any URL will be at least 14 hex chars.
+HEX_ENCODED_PATTERN = re.compile(
+    r'\b([0-9a-fA-F]{14,})\b'
 )
 
 # Full URL pattern (used for shortened URL detection)
@@ -308,7 +314,43 @@ def normalize_homoglyphs(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 5: Leetspeak Conversion
+# STAGE 5: Hex-Encoded URL Decoding
+# ═══════════════════════════════════════════════════════════════
+
+def decode_hex_urls(text: str) -> str:
+    """
+    Detect and decode hex-encoded URLs embedded in text.
+
+    Scammers encode entire URLs as hexadecimal strings to evade filters:
+        "687474703a2f2f7365637572652d7362692e78797a" → "http://secure-sbi.xyz"
+
+    Strategy:
+    1. Find long hexadecimal strings (≥14 hex chars = 7+ bytes).
+    2. Check that the byte length is even (valid hex pairs).
+    3. Attempt to decode as ASCII/UTF-8.
+    4. Only replace if the decoded result contains a URL-like pattern
+       (http://, https://, or domain.tld) to avoid false positives.
+    """
+    def _try_decode(match: re.Match) -> str:
+        hex_str = match.group(1)
+        # Must have even length (each byte = 2 hex chars)
+        if len(hex_str) % 2 != 0:
+            return match.group(0)
+        try:
+            decoded = bytes.fromhex(hex_str).decode('utf-8', errors='strict')
+        except (ValueError, UnicodeDecodeError):
+            return match.group(0)
+        # Only accept if it looks like a URL or domain
+        if re.search(r'https?://', decoded, re.IGNORECASE) or \
+           re.search(r'[a-zA-Z0-9\-]+\.[a-zA-Z]{2,}', decoded):
+            return decoded
+        return match.group(0)
+
+    return HEX_ENCODED_PATTERN.sub(_try_decode, text)
+
+
+# ═══════════════════════════════════════════════════════════════
+# STAGE 6: Leetspeak Conversion
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_leetspeak(text: str) -> str:
@@ -388,7 +430,7 @@ def normalize_leetspeak(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 6: Character-Spacing Deobfuscation
+# STAGE 7: Character-Spacing Deobfuscation
 # ═══════════════════════════════════════════════════════════════
 
 def deobfuscate_char_spacing(text: str) -> str:
@@ -417,7 +459,7 @@ def deobfuscate_char_spacing(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 7: URL Deobfuscation
+# STAGE 8: URL Deobfuscation
 # ═══════════════════════════════════════════════════════════════
 
 def deobfuscate_urls(text: str) -> str:
@@ -444,7 +486,7 @@ def deobfuscate_urls(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 8: Shortened URL Expansion
+# STAGE 9: Shortened URL Expansion
 # ═══════════════════════════════════════════════════════════════
 
 def _is_shortened_url(url: str) -> bool:
@@ -572,7 +614,7 @@ def expand_shortened_urls(
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 9: Whitespace Normalization
+# STAGE 10: Whitespace Normalization
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_whitespace(text: str) -> str:
@@ -588,7 +630,7 @@ def normalize_whitespace(text: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════
-# STAGE 10: Phone Number Normalization (Helper)
+# STAGE 11: Phone Number Normalization (Helper)
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_phone_number(text: str) -> str:
@@ -606,7 +648,7 @@ def normalize_phone_number(text: str) -> str:
 
 def normalize_input(text: str, expand_urls: bool = True) -> str:
     """
-    Production-grade 9-stage normalization pipeline.
+    Production-grade 11-stage normalization pipeline.
     
     ✅ Deterministic (same input → same output)
     ✅ Idempotent (running twice = same result)
@@ -638,13 +680,14 @@ def normalize_input(text: str, expand_urls: bool = True) -> str:
     text = remove_zero_width(text)              # Stage 2
     text = remove_control_characters(text)      # Stage 3
     text = normalize_homoglyphs(text)           # Stage 4
-    text = normalize_leetspeak(text)            # Stage 5
-    text = deobfuscate_char_spacing(text)       # Stage 6
-    text = deobfuscate_urls(text)               # Stage 7
-    if expand_urls:                             # Stage 8
+    text = decode_hex_urls(text)                # Stage 5
+    text = normalize_leetspeak(text)            # Stage 6
+    text = deobfuscate_char_spacing(text)       # Stage 7
+    text = deobfuscate_urls(text)               # Stage 8
+    if expand_urls:                             # Stage 9
         text = expand_shortened_urls(text)
-    text = normalize_whitespace(text)           # Stage 9
-    text = text.lower()                         # Stage 10
+    text = normalize_whitespace(text)           # Stage 10
+    text = text.lower()                         # Stage 11
     
     return text
 
@@ -716,23 +759,26 @@ def get_normalization_report(text: str) -> Dict[str, str]:
     current = normalize_homoglyphs(current)
     report["stage4_homoglyphs"] = current
     
+    current = decode_hex_urls(current)
+    report["stage5_hex_urls"] = current
+    
     current = normalize_leetspeak(current)
-    report["stage5_leetspeak"] = current
+    report["stage6_leetspeak"] = current
     
     current = deobfuscate_char_spacing(current)
-    report["stage6_char_spacing"] = current
+    report["stage7_char_spacing"] = current
     
     current = deobfuscate_urls(current)
-    report["stage7_urls"] = current
+    report["stage8_urls"] = current
     
     current = expand_shortened_urls(current)
-    report["stage8_short_urls"] = current
+    report["stage9_short_urls"] = current
     
     current = normalize_whitespace(current)
-    report["stage9_whitespace"] = current
+    report["stage10_whitespace"] = current
     
     current = current.lower()
-    report["stage10_final"] = current
+    report["stage11_final"] = current
     
     return report
 
