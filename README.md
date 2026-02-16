@@ -139,3 +139,64 @@ pip install -r requirements.txt
 
 ## ▶️ Running the Server
 python main.py
+Server runs at:
+```
+http://127.0.0.1:8000
+```
+## 🧪 Example Scam Input
+```
+Cyber Crime Cell Delhi case #CC-2026-7782
+Your bank account will be frozen.
+Click here: bit.ly/3xYzReward
+```
+### Agent Behavior:
+	•	Detects authority impersonation
+	•	Extracts case ID
+	•	Extracts shortened URL
+	•	Responds calmly and human-like
+	•	Continues engagement
+	•	Logs intelligence
+### 🛡️ Defense Against Bot Detection
+If scammer says:
+
+“Are you a bot?”
+
+The system uses:
+	•	Light humor
+	•	Mild confusion
+	•	Topic redirection
+
+To prevent early abandonment.
+
+### 📊 Telemetry & Logging
+
+The system logs:
+	•	Risk scores
+	•	Extracted intelligence
+	•	Conversation states
+	•	Suspicious link patterns
+	•	Session tracking
+
+Useful for:
+	•	Threat analysis
+	•	Scam pattern clustering
+	•	Research datasets
+
+### 🎯 Use Cases
+	•	Cybersecurity research
+	•	Scam intelligence collection
+	•	Fraud pattern analysis
+	•	Law enforcement support tools
+	•	Academic AI agent systems
+
+### 🔮 Future Improvements
+	•	Frontend dashboard (React-based)
+	•	Link expansion service
+	•	Threat intelligence scoring
+	•	Multi-agent conversation council
+	•	Deployment-ready Docker setup
+	•	Real-time monitoring dashboard
+### 👨‍💻 Creators
+
+-Abuzar Siddiqui
+-Praveen Shrivastav
