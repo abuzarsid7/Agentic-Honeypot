@@ -2,7 +2,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from detector import detect_scam_detailed, detect_red_flags
 from agent import agent_reply
-from memory import get_session, update_session, sessions
+from memory import get_session, save_session, sessions
 from normalizer import get_normalization_report, normalize_for_detection
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
@@ -139,7 +139,27 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             session = get_session(session_id, history)
 
-            # 🛡️ PRIORITY CHECK: Bot accusation (always engage, even on first message)
+            # ── Guard: refuse to reply once conversation has formally ended ──
+            if session.get("conversation_ended") or session.get("messages", 0) >= 9:
+                intel = session.get("intel", {})
+                return {
+                    "status": "ended",
+                    "sessionId": session_id,
+                    "scamDetected": True,
+                    "extractedIntelligence": intel,
+                    "engagementMetrics": {
+                        "engagementDurationSeconds": round(
+                            time.time() - session.get("start_time", time.time()), 1
+                        ),
+                        "totalMessagesExchanged": session.get("messages", 0),
+                    },
+                    "agentNotes": "Conversation ended — maximum exchanges reached or all intel collected.",
+                    "scamType": session.get("scam_type", "unknown"),
+                    "confidenceLevel": 1.0,
+                    "redFlags": session.get("red_flags_log", []),
+                    "conversationEnded": True,
+                    "reply": "",
+                }
             # This ensures defensive responses work even if scam detector misses it
             is_bot_accusation = is_bot_accusation_detected(message["text"])
 
@@ -175,15 +195,23 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             track_detection(True if is_bot_accusation else scam_detected)
 
             # Generate reply (always engage — bot accusation, scam, or subtle probe)
+            # Note: agent_reply mutates session in place, updates intel/asked_fields/history
+            # and calls save_session itself — do NOT call update_session after this.
             reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
-            update_session(session_id, message, reply)
+
+            # Accumulate red flags in session so responses grow richer over turns
+            existing_flags = session.get("red_flags_log", [])
+            new_flag_strs = [f for f in red_flags if f not in existing_flags]
+            session["red_flags_log"] = existing_flags + new_flag_strs
+            all_flags = session["red_flags_log"]
+            save_session(session_id, session)
 
             # ── Build full rubric-compliant response ──────────────────────────────
             intel = session.get("intel", {})
             total_messages = session.get("messages", 0)
             duration_secs = round(time.time() - session.get("start_time", time.time()), 1)
             collected_fields = [k for k, v in intel.items() if v]
-            flags_summary = ", ".join(red_flags[:3]) if red_flags else "none detected"
+            flags_summary = ", ".join(all_flags[:3]) if all_flags else "none detected"
             agent_notes = (
                 f"Engaged {scam_type} scam. "
                 f"Collected: {', '.join(collected_fields) or 'none yet'}. "
@@ -206,7 +234,8 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
                 "confidenceLevel": confidence_score,
                 # ── Extra fields (useful but not scored) ──
                 "reply": reply,
-                "redFlags": red_flags,
+                "redFlags": all_flags,
+                "conversationEnded": bool(session.get("conversation_ended", False)),
             }
 
     except HTTPException:

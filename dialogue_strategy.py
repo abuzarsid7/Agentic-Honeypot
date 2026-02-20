@@ -263,21 +263,21 @@ STATE_CONFIG = {
     },
     
     ConversationState.PROBE_PAYMENT: {
-        "goal": "Get the UPI ID, bank account number, beneficiary name, and payment reference number",
-        "extraction_targets": ["upiIds", "bankAccounts", "names", "caseIds"],
+        "goal": "Get the UPI ID, bank account number, IFSC code, beneficiary name, and payment reference number",
+        "extraction_targets": ["upiIds", "bankAccounts", "ifscCodes", "names", "caseIds"],
         "responses": [
             "Okay, what is the UPI ID I should send the money to?",
             "What is the full bank account number and the IFSC code?",
+            "I have the account number — can you also give me the IFSC code for the branch?",
             "Whose name is the UPI ID registered under?",
             "Can you tell me the account holder's full name for the bank transfer?",
             "What is the payment reference number I should mention while transferring?",
             "What is the beneficiary name that will show when I enter this account number?",
-            "Which bank does this account belong to? What is the branch name?",
+            "Which bank does this account belong to? What is the branch IFSC code?",
             "Can you also give me your phone number in case the payment fails?",
             "What receipt or reference number will I get after the payment?",
-            "What is the exact UPI ID? I want to make sure I send to the right place.",
         ],
-        "max_turns": 2,
+        "max_turns": 3,
     },
     
     ConversationState.PROBE_LINK: {
@@ -458,9 +458,24 @@ def get_next_state(
     
     total_messages = session.get("messages", 0)
 
-    # Hard global cap: end conversation at 9 messages (stay under 10)
+    # ── Hard global cap: reply 9 is the last one ────────────────
+    # On the 9th message the agent sends a closing reply and sets the
+    # conversation_ended flag.  /honeypot checks this flag at the top
+    # of every request and refuses to reply a 10th time.
     if total_messages >= 9:
+        session["conversation_ended"] = True
         return ConversationState.CLOSE
+
+    # ── Early-close: all relevant fields already collected ───────
+    # Once the agent has extracted every piece of intel that matters
+    # for this scam type there is no point continuing (min 5 turns).
+    if total_messages >= 5:
+        scam_type_key = session.get("scam_type", "unknown")
+        relevant = _get_relevant_fields(scam_type_key)
+        all_collected = all(intel.get(f) for f in relevant)
+        if all_collected and relevant:
+            session["conversation_ended"] = True
+            return ConversationState.CLOSE
 
     # ── State transition rules ─────────────────────────────────
     
@@ -995,7 +1010,8 @@ _FIELD_TEMPLATE_KEYWORDS = {
     "names": ["name", "full name", "supervisor", "manager", "officer", "beneficiary name", "account holder"],
     "phoneNumbers": ["phone", "number", "call back", "callback", "helpline", "landline", "toll-free", "direct number"],
     "upiIds": ["upi", "upi id"],
-    "bankAccounts": ["account number", "bank account", "ifsc", "branch"],
+    "bankAccounts": ["account number", "bank account", "branch"],
+    "ifscCodes": ["ifsc", "ifsc code", "branch ifsc", "branch code"],
     "emails": ["email", "email address", "email id"],
     "phishingLinks": ["link", "url", "website"],
     "caseIds": ["case", "reference", "fir", "complaint", "ticket", "case id"],
@@ -1009,6 +1025,7 @@ _FIELD_LABELS = {
     "phoneNumbers": "Phone numbers",
     "upiIds": "UPI IDs",
     "bankAccounts": "Bank account numbers",
+    "ifscCodes": "IFSC codes",
     "emails": "Email addresses",
     "phishingLinks": "URLs / links",
     "caseIds": "Case / reference IDs",
