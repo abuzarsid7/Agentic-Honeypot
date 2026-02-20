@@ -10,6 +10,7 @@ from dialogue_strategy import get_state_info
 from defense import is_bot_accusation_detected
 import os
 import re
+import time
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -170,28 +171,43 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             scam_detected = _is_scam(score_result)
 
-            if is_bot_accusation:
-                # Bot accusation detected - engage immediately to defend
-                reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
-                update_session(session_id, message, reply)
-                track_detection(True)  # Count as engagement
-                return {"status": "success", "sessionId": session_id, "reply": reply,
-                        "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
-
             # 📊 Track detection result
-            track_detection(scam_detected)
+            track_detection(True if is_bot_accusation else scam_detected)
 
-            if scam_detected:
-                reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
-                update_session(session_id, message, reply)
-                return {"status": "success", "sessionId": session_id, "reply": reply,
-                        "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
-            
-            # Always engage with LLM-generated responses to catch subtle scams
+            # Generate reply (always engage — bot accusation, scam, or subtle probe)
             reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
             update_session(session_id, message, reply)
-            return {"status": "success", "sessionId": session_id, "reply": reply,
-                    "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
+
+            # ── Build full rubric-compliant response ──────────────────────────────
+            intel = session.get("intel", {})
+            total_messages = session.get("messages", 0)
+            duration_secs = round(time.time() - session.get("start_time", time.time()), 1)
+            collected_fields = [k for k, v in intel.items() if v]
+            flags_summary = ", ".join(red_flags[:3]) if red_flags else "none detected"
+            agent_notes = (
+                f"Engaged {scam_type} scam. "
+                f"Collected: {', '.join(collected_fields) or 'none yet'}. "
+                f"Key signals: {flags_summary}."
+            )
+
+            return {
+                "status": "success",
+                # ── Required fields (rubric) ──
+                "sessionId": session_id,
+                "scamDetected": bool(scam_detected or is_bot_accusation),
+                "extractedIntelligence": intel,
+                # ── Optional fields (rubric) ──
+                "engagementMetrics": {
+                    "engagementDurationSeconds": duration_secs,
+                    "totalMessagesExchanged": total_messages,
+                },
+                "agentNotes": agent_notes,
+                "scamType": scam_type,
+                "confidenceLevel": confidence_score,
+                # ── Extra fields (useful but not scored) ──
+                "reply": reply,
+                "redFlags": red_flags,
+            }
 
     except HTTPException:
         # Let FastAPI handle auth errors properly

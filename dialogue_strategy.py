@@ -930,17 +930,17 @@ def get_state_info(state: ConversationState) -> Dict:
 _UNIVERSAL_FIELDS = ["names", "phoneNumbers"]
 
 SCAM_TYPE_FIELDS = {
-    # Bank impersonation: wants payment details, account info
-    "bank_impersonation": _UNIVERSAL_FIELDS + ["upiIds", "bankAccounts", "emails", "caseIds"],
+    # Bank impersonation: wants payment details, account info, and verification links
+    "bank_impersonation": _UNIVERSAL_FIELDS + ["upiIds", "bankAccounts", "phishingLinks", "emails", "caseIds"],
 
-    # Government impersonation: case IDs, legal references
-    "government_impersonation": _UNIVERSAL_FIELDS + ["emails", "caseIds", "bankAccounts", "upiIds"],
+    # Government impersonation: case IDs, legal references, links
+    "government_impersonation": _UNIVERSAL_FIELDS + ["emails", "caseIds", "phishingLinks", "bankAccounts", "upiIds"],
 
     # Tech support: phishing links, remote access, case IDs
     "tech_support": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "caseIds", "upiIds"],
 
-    # Lottery/prize: bank accounts for "prize deposit", emails
-    "lottery_prize": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "emails", "caseIds"],
+    # Lottery/prize: bank accounts for "prize deposit", emails, links
+    "lottery_prize": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "phishingLinks", "emails", "caseIds"],
 
     # Investment fraud: bank accounts, UPI, links
     "investment_fraud": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "phishingLinks", "emails"],
@@ -954,8 +954,8 @@ SCAM_TYPE_FIELDS = {
     # Delivery/courier scam: order numbers, tracking, links, UPI
     "delivery_scam": _UNIVERSAL_FIELDS + ["orderNumbers", "phishingLinks", "upiIds", "caseIds"],
 
-    # Tax refund scam: bank accounts, emails, case IDs
-    "tax_refund": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "emails", "caseIds"],
+    # Tax refund scam: bank accounts, emails, case IDs, links
+    "tax_refund": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "phishingLinks", "emails", "caseIds"],
 
     # Account verification / KYC update: links, emails, UPI
     "account_verification": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "upiIds", "bankAccounts"],
