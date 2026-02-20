@@ -173,7 +173,7 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
     """
     _empty = {
         "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
-        "bankAccounts": [],
+        "bankAccounts": [], "ifscCodes": [],
         "names": [], "emails": [],
         "caseIds": [], "policyNumbers": [], "orderNumbers": [],
     }
@@ -204,13 +204,14 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
 7. Case IDs / Reference numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024)
 8. Policy numbers (e.g. POL-123456, LIC12345678)
 9. Order numbers (e.g. ORD-12345, AWB1234567890)
+10. IFSC codes — Indian bank branch codes (format: 4 uppercase letters + 0 + 6 alphanumeric chars, e.g. SBIN0001234, HDFC0000123). Extract ONLY valid IFSC codes.
 
-Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, names, emails, caseIds, policyNumbers, orderNumbers.
+Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, ifscCodes, names, emails, caseIds, policyNumbers, orderNumbers.
 Each should be an array of strings. Extract ALL instances, even if obfuscated or split.
 IMPORTANT for names: Only extract strings that are clearly human person names. If no person name is mentioned, return an empty array for names. Do NOT guess or infer names from context.
 
 Example:
-{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": [], "names": ["Rajesh Kumar"], "emails": [], "caseIds": ["REF-20230001"], "policyNumbers": [], "orderNumbers": []}"""
+{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": ["1234567890123456"], "ifscCodes": ["SBIN0001234"], "names": ["Rajesh Kumar"], "emails": [], "caseIds": ["REF-20230001"], "policyNumbers": [], "orderNumbers": []}"""  
         
         user_prompt = f"Extract intelligence from this scammer message:\n\n{text}\n\nReturn JSON only."
         
@@ -305,6 +306,7 @@ def merge_and_deduplicate(
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
+        "ifscCodes": [],
         "names": [],
         "emails": [],
         "caseIds": [],
@@ -331,9 +333,12 @@ def merge_and_deduplicate(
                 merged["phoneNumbers"].append(normalized)
     
     # Merge URLs (normalize and dedup)
+    # Hard filter: reject anything containing '@' — those are emails or UPI IDs, not URLs.
     seen_urls: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
         for url in source.get("phishingLinks", []):
+            if '@' in url:          # email/UPI masquerading as a link — skip
+                continue
             normalized = normalize_url(url)
             if normalized not in seen_urls:
                 seen_urls.add(normalized)
@@ -395,6 +400,16 @@ def merge_and_deduplicate(
                 seen_orders.add(normalized)
                 merged["orderNumbers"].append(order.strip())
 
+    # Merge IFSC codes (uppercase dedup, validate format)
+    _IFSC_RE = re.compile(r'^[A-Z]{4}0[A-Z0-9]{6}$')
+    seen_ifsc: Set[str] = set()
+    for source in [regex_results, advanced_results, llm_results]:
+        for code in source.get("ifscCodes", []):
+            normalized = code.strip().upper()
+            if normalized and normalized not in seen_ifsc and _IFSC_RE.match(normalized):
+                seen_ifsc.add(normalized)
+                merged["ifscCodes"].append(normalized)
+
     # Cross-field dedup: remove any phishing link that is just the domain of a known
     # UPI ID or email address (e.g. http://gmail.com appearing because user@gmail.com
     # was captured by the spaced-URL pattern).
@@ -406,11 +421,18 @@ def merge_and_deduplicate(
         if '@' in email:
             at_domains.add(email.split('@', 1)[1].lower().strip())
 
-    def _link_is_bare_domain(url: str) -> bool:
-        stripped = re.sub(r'^https?://', '', url).rstrip('/')
-        return stripped.lower() in at_domains
+    def _link_is_at_domain(url: str) -> bool:
+        """True when a phishing-link candidate is really just an email/UPI domain."""
+        stripped = re.sub(r'^https?://', '', url).rstrip('/').lower()
+        # Exact match (e.g. http://gmail.com == gmail.com)
+        if stripped in at_domains:
+            return True
+        # Subdomain match (e.g. http://mail.gmail.com — host ends with .gmail.com)
+        if any(stripped == d or stripped.endswith('.' + d) for d in at_domains):
+            return True
+        return False
 
-    merged["phishingLinks"] = [u for u in merged["phishingLinks"] if not _link_is_bare_domain(u)]
+    merged["phishingLinks"] = [u for u in merged["phishingLinks"] if not _link_is_at_domain(u)]
 
     return merged
 
@@ -445,6 +467,7 @@ def extract_intel(session, text):
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
+        "ifscCodes": [],
         "names": [],
         "emails": [],
         "caseIds": [],
@@ -499,13 +522,22 @@ def extract_intel(session, text):
     # Extract phone numbers (+91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit)
     regex_results["phoneNumbers"] = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<!\d)\d{10}(?!\d)", text_clean)
 
-    # Extract URLs
-    links = re.findall(r"https?://\S+", text_clean)
-    regex_results["phishingLinks"] = [link.rstrip('.,;:!?)') for link in links]
+    # Extract URLs — both http(s):// and bare www. links
+    https_links = re.findall(r"https?://\S+", text_clean)
+    www_links   = re.findall(r"(?<![/@])\bwww\.\S+", text_clean)
+    all_links   = https_links + www_links
+    regex_results["phishingLinks"] = [
+        link.rstrip('.,;:!?)') for link in all_links
+        if '@' not in link  # exclude anything that is an email/UPI
+    ]
 
     # Extract account numbers (8-16 digits, but not 10-digit phone numbers)
     accounts = re.findall(r"\b\d{8,16}\b", text_clean)
     regex_results["bankAccounts"] = [acc for acc in accounts if len(acc) != 10]
+
+    # Extract IFSC codes (4 alpha + 0 + 6 alphanumeric = 11 chars)
+    ifsc_codes = re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text_clean)
+    regex_results["ifscCodes"] = ifsc_codes
 
     # NOTE: Name extraction is handled exclusively by the LLM (Step 3)
     # because regex-based name extraction produces too many false positives—
@@ -543,6 +575,7 @@ def extract_intel(session, text):
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
+        "ifscCodes": [],
         "names": [],
         "emails": [],
         "caseIds": [],
@@ -588,7 +621,7 @@ def extract_intel(session, text):
     history = session.get("history", [])
     llm_results = extract_intel_with_llm(text, history) if _run_llm_extraction else {
         "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
-        "bankAccounts": [], "names": [], "emails": [],
+        "bankAccounts": [], "ifscCodes": [], "names": [], "emails": [],
         "caseIds": [], "policyNumbers": [], "orderNumbers": [],
         "source": "skipped",
     }
@@ -678,6 +711,11 @@ def extract_intel(session, text):
     for order in merged.get("orderNumbers", []):
         if order not in session["intel"].get("orderNumbers", []):
             session["intel"].setdefault("orderNumbers", []).append(order)
+
+    # Add IFSC codes
+    for ifsc in merged.get("ifscCodes", []):
+        if ifsc not in session["intel"].get("ifscCodes", []):
+            session["intel"].setdefault("ifscCodes", []).append(ifsc)
 
     # Track telemetry
     if new_counts["upi"] > 0:

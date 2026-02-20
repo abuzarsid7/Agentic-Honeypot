@@ -45,6 +45,7 @@ def get_session(session_id: str, history: list = None):
             "upiIds": [],
             "phishingLinks": [],
             "bankAccounts": [],
+            "ifscCodes": [],
             "names": [],
             "emails": [],
             "caseIds": [],

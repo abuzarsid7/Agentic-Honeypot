@@ -390,6 +390,7 @@ def _detect_link_mention(text: str) -> bool:
     """Check if message contains URLs or link-related content."""
     link_patterns = [
         r'https?://',
+        r'\bwww\.',
         r'\b(click|link|website|url|visit|open)\b',
     ]
     return any(re.search(p, text, re.IGNORECASE) for p in link_patterns)
@@ -684,7 +685,8 @@ def _generate_llm_response(
             "names": "Their full name, officer name, or supervisor name",
             "phoneNumbers": "A phone number (callback number, helpline, department landline)",
             "upiIds": "A UPI ID",
-            "bankAccounts": "A bank account number and IFSC code",
+            "bankAccounts": "A bank account number",
+            "ifscCodes": "The IFSC code for the bank account",
             "emails": "An email address (official email, confirmation email)",
             "phishingLinks": "A URL or website link (ask them to share the exact link)",
             "caseIds": "A case ID, reference number, FIR number, or complaint number",
@@ -931,10 +933,10 @@ _UNIVERSAL_FIELDS = ["names", "phoneNumbers"]
 
 SCAM_TYPE_FIELDS = {
     # Bank impersonation: wants payment details, account info, and verification links
-    "bank_impersonation": _UNIVERSAL_FIELDS + ["upiIds", "bankAccounts", "phishingLinks", "emails", "caseIds"],
+    "bank_impersonation": _UNIVERSAL_FIELDS + ["upiIds", "bankAccounts", "ifscCodes", "phishingLinks", "emails", "caseIds"],
 
     # Government impersonation: case IDs, legal references, links
-    "government_impersonation": _UNIVERSAL_FIELDS + ["emails", "caseIds", "phishingLinks", "bankAccounts", "upiIds"],
+    "government_impersonation": _UNIVERSAL_FIELDS + ["emails", "caseIds", "phishingLinks", "bankAccounts", "ifscCodes", "upiIds"],
 
     # Tech support: phishing links, remote access, case IDs
     "tech_support": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "caseIds", "upiIds"],
@@ -973,7 +975,7 @@ SCAM_TYPE_FIELDS = {
 
 # Fallback: when scam type is unknown or not mapped, use ALL fields
 _ALL_FIELDS = [
-    "names", "phoneNumbers", "upiIds", "bankAccounts",
+    "names", "phoneNumbers", "upiIds", "bankAccounts", "ifscCodes",
     "emails", "phishingLinks", "caseIds", "policyNumbers", "orderNumbers",
 ]
 
@@ -1024,40 +1026,34 @@ def infer_asked_field(reply: str) -> Optional[str]:
     """
     r = reply.lower()
     checks = [
-        ("upiIds",        ["upi id", "upi address", "upi "]),
-        ("bankAccounts",  ["account number", "ifsc", "bank account"]),
+        ("upiIds",        ["upi id", "upi address", "upi ", "upi number"]),
+        ("bankAccounts",  ["account number", "ifsc", "bank account", "account no"]),
+        ("ifscCodes",     ["ifsc code", "ifsc number", "branch code"]),
         ("emails",        ["email address", "email id", "your email", "email "]),
-        ("phishingLinks", ["website address", "exact link", "full url", "the link", "the url", "web address"]),
-        ("caseIds",       ["case id", "case number", "reference number", "fir number", "complaint number", "ticket id", "ticket number"]),
+        # Phishing links — catch all ways agent might ask for a URL/website
+        ("phishingLinks", [
+            "website address", "exact link", "full url", "the link", "the url",
+            "web address", "website link", "your website", "official website",
+            "verification link", "portal link", "login link", "portal",
+            "share the link", "send me the link", "what is the website",
+            "what's the website", "which website", "site link",
+        ]),
+        ("caseIds",       ["case id", "case number", "reference number", "fir number",
+                           "complaint number", "ticket id", "ticket number", "ref number"]),
         ("policyNumbers", ["policy number", "insurance number", "policy "]),
         ("orderNumbers",  ["order number", "tracking number", "awb"]),
-        ("phoneNumbers",  ["phone number", "call back", "callback", "helpline", "landline", "contact number", "call you back"]),
-        ("names",         ["your name", "full name", "your full name", "what is your name"]),
-    ]
-    for field, keywords in checks:
-        if any(kw in r for kw in keywords):
-            return field
-    return None
-
-
-def infer_asked_field(reply: str) -> Optional[str]:
-    """
-    Detect which extraction field a reply is probing for.
-    Used to populate session['asked_fields'] so the agent never repeats
-    the same question across multiple turns.
-    Returns the field key (e.g. 'upiIds') or None if unclear.
-    """
-    r = reply.lower()
-    checks = [
-        ("upiIds",        ["upi id", "upi address", "upi "]),
-        ("bankAccounts",  ["account number", "ifsc", "bank account"]),
-        ("emails",        ["email address", "email id", "your email", "email "]),
-        ("phishingLinks", ["website address", "exact link", "full url", "the link", "the url", "web address"]),
-        ("caseIds",       ["case id", "case number", "reference number", "fir number", "complaint number", "ticket id", "ticket number"]),
-        ("policyNumbers", ["policy number", "insurance number", "policy "]),
-        ("orderNumbers",  ["order number", "tracking number", "awb"]),
-        ("phoneNumbers",  ["phone number", "call back", "callback", "helpline", "landline", "contact number", "call you back"]),
-        ("names",         ["your name", "full name", "your full name", "what is your name"]),
+        ("phoneNumbers",  ["phone number", "call back", "callback", "helpline",
+                           "landline", "contact number", "call you back",
+                           "contact me", "reach you", "your number"]),
+        # Names — broadened to catch natural phrasings the LLM uses
+        ("names",         [
+            "your name", "full name", "your full name", "what is your name",
+            "who are you", "who is this", "speaking with", "i am speaking",
+            "who am i", "your good name", "good name", "officer name",
+            "supervisor name", "name please", "name sir", "name madam",
+            "introduce yourself", "may i know your", "could you tell me your name",
+            "what should i call you", "your identity",
+        ]),
     ]
     for field, keywords in checks:
         if any(kw in r for kw in keywords):
