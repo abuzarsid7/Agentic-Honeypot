@@ -243,7 +243,7 @@ STATE_CONFIG = {
             "What is your employee ID? And what department do you work in?",
             "I need to note this down. What is the official case number you are referring to?",
         ],
-        "max_turns": 2,
+        "max_turns": 1,
     },
     
     ConversationState.PROBE_REASON: {
@@ -259,7 +259,7 @@ STATE_CONFIG = {
             "Is there a complaint number or FIR number I should know about?",
             "Which policy or order number is this related to? I have several.",
         ],
-        "max_turns": 4,
+        "max_turns": 2,
     },
     
     ConversationState.PROBE_PAYMENT: {
@@ -277,7 +277,7 @@ STATE_CONFIG = {
             "What receipt or reference number will I get after the payment?",
             "What is the exact UPI ID? I want to make sure I send to the right place.",
         ],
-        "max_turns": 5,
+        "max_turns": 2,
     },
     
     ConversationState.PROBE_LINK: {
@@ -295,7 +295,7 @@ STATE_CONFIG = {
             "Can you share your email ID so I can write to you if the link doesn't work?",
             "What is the full website address? And what is the customer support number on it?",
         ],
-        "max_turns": 4,
+        "max_turns": 2,
     },
     
     ConversationState.STALL: {
@@ -313,7 +313,7 @@ STATE_CONFIG = {
             "Can you share the complaint number or ticket ID so I can track this?",
             "What is your supervisor's name and direct number? I want to verify with them.",
         ],
-        "max_turns": 3,
+        "max_turns": 1,
     },
     
     ConversationState.CONFIRM_DETAILS: {
@@ -331,7 +331,7 @@ STATE_CONFIG = {
             "My son is asking for the insurance or policy number. What is it?",
             "What is the official reference ID I should keep for this entire process?",
         ],
-        "max_turns": 3,
+        "max_turns": 1,
     },
     
     ConversationState.ESCALATE_EXTRACTION: {
@@ -349,7 +349,7 @@ STATE_CONFIG = {
             "Can you give me an alternate phone number to reach your department?",
             "What is the tracking number or order ID I should use to check status?",
         ],
-        "max_turns": 4,
+        "max_turns": 3,
     },
     
     ConversationState.CLOSE: {
@@ -367,7 +367,7 @@ STATE_CONFIG = {
             "What is the order number or policy number for my records?",
             "Alright. What is the toll-free number and the case ID I should keep?",
         ],
-        "max_turns": 2,
+        "max_turns": 1,
     },
 }
 
@@ -456,7 +456,11 @@ def get_next_state(
     has_urls = len(intel.get("phishingLinks", [])) > 0
     
     total_messages = session.get("messages", 0)
-    
+
+    # Hard global cap: end conversation at 9 messages (stay under 10)
+    if total_messages >= 9:
+        return ConversationState.CLOSE
+
     # ── State transition rules ─────────────────────────────────
     
     if current_state == ConversationState.INIT:
@@ -514,38 +518,36 @@ def get_next_state(
     
     elif current_state == ConversationState.ESCALATE_EXTRACTION:
         # ── Intelligent closing logic using intel_score ──
-        
-        # Pattern 1: Scammer disengaged → close immediately
+
+        # Minimum engagement: keep talking for at least 5 messages
+        if total_messages < 5:
+            return ConversationState.ESCALATE_EXTRACTION
+
+        # Pattern 1: Scammer disengaged → close
         if patterns["disengagement"]:
             return ConversationState.CLOSE
-        
-        # Pattern 2: (removed — repeated pressure is an opportunity to extract more)
-        
-        # Pattern 3: Stale intel (no new intel in 3 turns) + good extraction → close
+
+        # Pattern 3: Stale intel (no new intel in last 3 turns) + decent extraction → close
         if patterns["stale_intel"] and components["artifacts"] >= 0.4:
             return ConversationState.CLOSE
-        
+
         # Pattern 4: High quality extraction complete (intel_score > 0.75)
         if intel_score >= 0.75:
             return ConversationState.CLOSE
-        
-        # Pattern 5: Good extraction + low novelty → diminishing returns
+
+        # Pattern 5: Good extraction + diminishing novelty
         if components["artifacts"] >= 0.6 and components["novelty"] < 0.3:
             return ConversationState.CLOSE
-        
-        # Pattern 6: Multiple warning signs (high severity)
+
+        # Pattern 6: Multiple warning signs
         if patterns["severity"] >= 0.7:
             return ConversationState.CLOSE
-        
-        # Pattern 7: Hard limit safety check (fallback)
-        if total_messages >= 30:
-            return ConversationState.CLOSE
-        
-        # Pattern 8: Traditional check - substantial intel collected
+
+        # Pattern 8: Traditional check - has phone + payment/link, exceeded turns
         if has_phone and (has_upi or has_urls) and exceeded_turns:
             return ConversationState.CLOSE
-        
-        # Continue extracting if still getting value
+
+        # Continue extracting
         return ConversationState.ESCALATE_EXTRACTION
     
     elif current_state == ConversationState.CLOSE:
@@ -650,6 +652,7 @@ def _generate_llm_response(
     example_responses: List[str],
     intel_summary: str,
     scam_type: str = "unknown",
+    asked_fields: Dict = None,
 ) -> Optional[str]:
     """
     Use the LLM to generate a contextual response based on the scammer's
@@ -676,7 +679,7 @@ def _generate_llm_response(
             history_lines.append(f"{role}: {msg.get('text', '')}")
         history_context = "\n".join(history_lines) if history_lines else "(first message)"
 
-        # Build dynamic field list based on scam type
+        # Build dynamic field list: only fields not yet collected AND not yet asked
         _field_prompts = {
             "names": "Their full name, officer name, or supervisor name",
             "phoneNumbers": "A phone number (callback number, helpline, department landline)",
@@ -688,8 +691,10 @@ def _generate_llm_response(
             "policyNumbers": "A policy number or insurance number",
             "orderNumbers": "An order number, tracking number, or AWB number",
         }
-        relevant = _get_relevant_fields(scam_type)
-        data_points = "\n".join(f"  - {_field_prompts[f]}" for f in relevant if f in _field_prompts)
+        _, not_yet_asked = get_collected_and_missing(intel, scam_type, asked_fields or {})
+        data_points = "\n".join(f"  - {_field_prompts[f]}" for f in not_yet_asked if f in _field_prompts)
+        if not data_points:
+            data_points = "  (All key data points collected or asked — wind down naturally.)"
 
         scam_context = ""
         if scam_type and scam_type != "unknown":
@@ -758,6 +763,7 @@ def generate_state_response(
     turn_in_state: int,
     history: List,
     scam_type: str = "unknown",
+    asked_fields: Dict = None,
 ) -> Tuple[str, Dict]:
     """
     Generate a response appropriate for the current state with micro-behaviors.
@@ -769,10 +775,12 @@ def generate_state_response(
         turn_in_state: Turn count within current state
         history: Conversation history for consistency
         scam_type: Detected scam category for field relevance
+        asked_fields: Dict of field → ask count to prevent repeating questions
     
     Returns:
         Tuple of (response_string, metadata_dict)
     """
+    asked_fields = asked_fields or {}
     config = STATE_CONFIG[state]
     responses = config["responses"]
     goal = config.get("goal", "")
@@ -781,8 +789,8 @@ def generate_state_response(
     claims = extract_honeypot_claims(history)
 
     # ── Intel-awareness: compute what's collected vs missing ──
-    collected, missing = get_collected_and_missing(intel, scam_type)
-    intel_summary = _format_intel_summary(intel, scam_type)
+    collected, missing = get_collected_and_missing(intel, scam_type, asked_fields)
+    intel_summary = _format_intel_summary(intel, scam_type, asked_fields)
     
     # Try LLM-based contextual response first
     llm_response = _generate_llm_response(
@@ -794,6 +802,7 @@ def generate_state_response(
         example_responses=responses,
         intel_summary=intel_summary,
         scam_type=scam_type,
+        asked_fields=asked_fields,
     )
     
     if llm_response:
@@ -890,6 +899,7 @@ def execute_strategy(session: Dict, scammer_text: str) -> Tuple[str, Conversatio
         turn_in_state=turn_in_state,
         history=history,
         scam_type=session.get("scam_type", "unknown"),
+        asked_fields=session.get("asked_fields", {}),
     )
     
     return response, next_state, metadata
@@ -1004,27 +1014,84 @@ _FIELD_LABELS = {
 }
 
 
-def get_collected_and_missing(intel: Dict, scam_type: str = "unknown") -> Tuple[List[str], List[str]]:
+def infer_asked_field(reply: str) -> Optional[str]:
+    """
+    Detect which extraction field a reply is probing for.
+    Used to populate session['asked_fields'] so the agent never repeats
+    the same question across multiple turns.
+    Returns the field key (e.g. 'upiIds') or None if unclear.
+    """
+    r = reply.lower()
+    checks = [
+        ("upiIds",        ["upi id", "upi address", "upi "]),
+        ("bankAccounts",  ["account number", "ifsc", "bank account"]),
+        ("emails",        ["email address", "email id", "your email", "email "]),
+        ("phishingLinks", ["website address", "exact link", "full url", "the link", "the url", "web address"]),
+        ("caseIds",       ["case id", "case number", "reference number", "fir number", "complaint number", "ticket id", "ticket number"]),
+        ("policyNumbers", ["policy number", "insurance number", "policy "]),
+        ("orderNumbers",  ["order number", "tracking number", "awb"]),
+        ("phoneNumbers",  ["phone number", "call back", "callback", "helpline", "landline", "contact number", "call you back"]),
+        ("names",         ["your name", "full name", "your full name", "what is your name"]),
+    ]
+    for field, keywords in checks:
+        if any(kw in r for kw in keywords):
+            return field
+    return None
+
+
+def infer_asked_field(reply: str) -> Optional[str]:
+    """
+    Detect which extraction field a reply is probing for.
+    Used to populate session['asked_fields'] so the agent never repeats
+    the same question across multiple turns.
+    Returns the field key (e.g. 'upiIds') or None if unclear.
+    """
+    r = reply.lower()
+    checks = [
+        ("upiIds",        ["upi id", "upi address", "upi "]),
+        ("bankAccounts",  ["account number", "ifsc", "bank account"]),
+        ("emails",        ["email address", "email id", "your email", "email "]),
+        ("phishingLinks", ["website address", "exact link", "full url", "the link", "the url", "web address"]),
+        ("caseIds",       ["case id", "case number", "reference number", "fir number", "complaint number", "ticket id", "ticket number"]),
+        ("policyNumbers", ["policy number", "insurance number", "policy "]),
+        ("orderNumbers",  ["order number", "tracking number", "awb"]),
+        ("phoneNumbers",  ["phone number", "call back", "callback", "helpline", "landline", "contact number", "call you back"]),
+        ("names",         ["your name", "full name", "your full name", "what is your name"]),
+    ]
+    for field, keywords in checks:
+        if any(kw in r for kw in keywords):
+            return field
+    return None
+
+
+def get_collected_and_missing(intel: Dict, scam_type: str = "unknown", asked_fields: Dict = None) -> Tuple[List[str], List[str]]:
     """
     Analyse the session intel dict and return two lists, filtered by scam type:
       - collected: relevant field names that already have at least one value
-      - missing:   relevant field names that are still empty
-    
+      - missing:   relevant field names not yet collected AND not yet asked about
+
+    Fields already asked about (ask_count >= 1) are excluded from 'missing'
+    to prevent the agent from repeating the same question.
     Only fields relevant to the detected scam type are considered.
     """
+    asked_fields = asked_fields or {}
     relevant_fields = _get_relevant_fields(scam_type)
     collected = [f for f in relevant_fields if intel.get(f)]
-    missing = [f for f in relevant_fields if not intel.get(f)]
+    missing = [f for f in relevant_fields if not intel.get(f) and asked_fields.get(f, 0) < 1]
     return collected, missing
 
 
-def _format_intel_summary(intel: Dict, scam_type: str = "unknown") -> str:
+def _format_intel_summary(intel: Dict, scam_type: str = "unknown", asked_fields: Dict = None) -> str:
     """
     Build a concise human-readable summary of what has been collected
     and what is still needed. Injected into the LLM prompt.
     Only shows fields relevant to the detected scam type.
     """
-    collected, missing = get_collected_and_missing(intel, scam_type)
+    asked_fields = asked_fields or {}
+    relevant_fields = _get_relevant_fields(scam_type)
+    collected, missing = get_collected_and_missing(intel, scam_type, asked_fields)
+    # Fields asked but scammer hasn't answered yet
+    pending = [f for f in relevant_fields if not intel.get(f) and asked_fields.get(f, 0) >= 1]
 
     lines = []
 
@@ -1040,12 +1107,16 @@ def _format_intel_summary(intel: Dict, scam_type: str = "unknown") -> str:
         for f in collected:
             values = intel.get(f, [])
             lines.append(f"  ✓ {_FIELD_LABELS.get(f, f)}: {', '.join(str(v) for v in values)}")
+    if pending:
+        lines.append("ALREADY ASKED — do NOT ask these again (awaiting scammer reply):")
+        for f in pending:
+            lines.append(f"  ~ {_FIELD_LABELS.get(f, f)}")
     if missing:
-        lines.append("STILL MISSING — RELEVANT TO THIS SCAM (ask for ONE of these next):")
+        lines.append("NOT YET ASKED — pick ONE from this list next:")
         for f in missing:
             lines.append(f"  ✗ {_FIELD_LABELS.get(f, f)}")
-    if not missing:
-        lines.append("ALL RELEVANT FIELDS COLLECTED. Wind down the conversation.")
+    if not missing and not pending:
+        lines.append("ALL RELEVANT FIELDS COLLECTED OR ASKED. Wind down the conversation.")
 
     return "\n".join(lines)
 

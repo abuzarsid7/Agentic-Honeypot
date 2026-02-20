@@ -5,7 +5,7 @@ Agent module for generating honeypot responses using dialogue strategy.
 import time
 from intelligence import extract_intel, maybe_finish, store_intel
 from callback import send_final_result
-from dialogue_strategy import execute_strategy, ConversationState
+from dialogue_strategy import execute_strategy, ConversationState, infer_asked_field
 from defense import defend_against_bot_accusation
 from memory import save_session, append_chat_log
 from llm_engine import analyze_message
@@ -83,6 +83,13 @@ def agent_reply(session_id, session, scammer_text):
 
         if "scam_score" not in session:
             session["scam_score"] = 0.5
+
+    # Track which extraction field this reply targeted to prevent repeat questions
+    asked_field = infer_asked_field(reply)
+    if asked_field:
+        if "asked_fields" not in session:
+            session["asked_fields"] = {}
+        session["asked_fields"][asked_field] = session["asked_fields"].get(asked_field, 0) + 1
 
     # ── Everything below runs for EVERY message (defense or not) ──
 

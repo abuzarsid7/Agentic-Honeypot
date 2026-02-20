@@ -534,6 +534,86 @@ def detect_scam_detailed(text: str, history: list) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════════
+# RED FLAG DETECTOR  (human-readable list for frontend/output)
+# ═══════════════════════════════════════════════════════════════
+
+def detect_red_flags(text: str, history: list, precomputed: Dict = None) -> List[str]:
+    """
+    Return a list of plain-English red flag strings detected in the message.
+    Draws on all scoring signals, hard triggers, emotional patterns, and
+    LLM analysis so the frontend can display them to an analyst.
+    Accepts an optional pre-computed result from detect_scam_detailed to
+    avoid redundant LLM calls.
+    """
+    if not text or len(text.strip()) < 3:
+        return []
+
+    result = precomputed if precomputed is not None else compute_scam_score(text, history)
+    signals = result["signals"]
+    boosters = result["boosters"]
+    llm = result.get("llm_analysis", {})
+
+    flags: List[str] = []
+
+    # ── Hard triggers (highest confidence) ──
+    if result["hard_trigger"]:
+        reason = result["hard_trigger_reason"]
+        if reason == "credential_harvest_attempt":
+            flags.append("Credential harvesting — asks for OTP, PIN, CVV, or password")
+        elif reason == "payment_redirection_with_upi":
+            flags.append("Payment redirection — provides UPI ID alongside payment pressure")
+
+    # ── Signal-based flags ──
+    if signals.get("urgency", {}).get("score", 0) >= 0.5:
+        flags.append("Artificial urgency — uses time pressure or threat of immediate consequences")
+    elif signals.get("urgency", {}).get("score", 0) >= 0.25:
+        flags.append("Mild urgency language detected")
+
+    if signals.get("authority", {}).get("score", 0) >= 0.5:
+        flags.append("Authority impersonation — claims to be bank, government, or law enforcement")
+    elif signals.get("authority", {}).get("score", 0) >= 0.25:
+        flags.append("Possible authority impersonation")
+
+    if signals.get("payment_request", {}).get("score", 0) >= 0.5:
+        flags.append("Unsolicited payment request — pressuring victim to transfer money")
+    elif signals.get("payment_request", {}).get("score", 0) >= 0.25:
+        flags.append("Payment-related language detected")
+
+    if signals.get("keyword", {}).get("score", 0) >= 0.6:
+        flags.append("High concentration of known scam keywords")
+
+    # ── Emotional manipulation flags ──
+    emotional = boosters.get("emotional_manipulation", {})
+    if emotional.get("fear"):
+        flags.append("Fear manipulation — threatens arrest, loss, or harm")
+    if emotional.get("greed"):
+        flags.append("Greed manipulation — promises prize, reward, or easy money")
+    if emotional.get("sympathy"):
+        flags.append("Sympathy manipulation — invokes emergency or helplessness")
+    if emotional.get("guilt"):
+        flags.append("Guilt manipulation — pressures victim to comply by questioning trust")
+
+    # ── LLM-derived flags ──
+    narrative_cat = llm.get("scam_narrative", {}).get("category", "unknown")
+    if narrative_cat and narrative_cat not in ("unknown", ""):
+        label = narrative_cat.replace("_", " ").title()
+        flags.append(f"Scam type identified: {label}")
+
+    se = llm.get("social_engineering", {})
+    se_tactics = [k for k, v in se.items() if v is True]
+    if se_tactics:
+        readable = ", ".join(t.replace("_", " ").title() for t in se_tactics)
+        flags.append(f"Social engineering tactics: {readable}")
+
+    intent_label = llm.get("intent", {}).get("label", "")
+    intent_conf = llm.get("intent", {}).get("confidence", 0)
+    if intent_label and intent_label not in ("benign", "unknown", "") and intent_conf >= 0.5:
+        flags.append(f"LLM intent classification: {intent_label.replace('_', ' ').title()} (confidence {intent_conf:.0%})")
+
+    return flags
+
+
+# ═══════════════════════════════════════════════════════════════
 # LOGGING HELPER
 # ═══════════════════════════════════════════════════════════════
 

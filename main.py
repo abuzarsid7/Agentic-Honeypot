@@ -1,14 +1,15 @@
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from detector import detect_scam, detect_scam_detailed
+from detector import detect_scam_detailed, detect_red_flags
 from agent import agent_reply
 from memory import get_session, update_session, sessions
-from normalizer import get_normalization_report
+from normalizer import get_normalization_report, normalize_for_detection
 from telemetry import track_request, track_detection, get_metrics
 from llm_engine import analyze_message, get_cache_stats, clear_cache, get_provider_info
 from dialogue_strategy import get_state_info
 from defense import is_bot_accusation_detected
 import os
+import re
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -140,29 +141,57 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             # 🛡️ PRIORITY CHECK: Bot accusation (always engage, even on first message)
             # This ensures defensive responses work even if scam detector misses it
             is_bot_accusation = is_bot_accusation_detected(message["text"])
-            
+
+            # Single scoring call — derive scam_detected, confidence, scam_type, red_flags from it
+            score_result = detect_scam_detailed(message["text"], history)
+            confidence_score = round(score_result.get("scam_score", 0.0), 4)
+            scam_type = (
+                score_result.get("llm_analysis", {})
+                            .get("scam_narrative", {})
+                            .get("category", "unknown") or "unknown"
+            )
+            red_flags = detect_red_flags(message["text"], history, precomputed=score_result)
+
+            # Derive scam_detected from the pre-computed result (mirrors detect_scam logic)
+            def _is_scam(r: dict) -> bool:
+                if r.get("is_scam"):
+                    return True
+                if r.get("is_suspicious") and len(history) > 0:
+                    return True
+                if r.get("is_suspicious") and r.get("signals", {}).get("authority", {}).get("score", 0) >= 0.3:
+                    return True
+                txt = message["text"]
+                txt_norm = normalize_for_detection(txt)
+                if (re.search(r"https?://", txt) or re.search(r"https?://", txt_norm)
+                        or re.search(r"\+?\d{10,}", txt)
+                        or re.search(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", txt)):
+                    return True
+                return False
+
+            scam_detected = _is_scam(score_result)
+
             if is_bot_accusation:
                 # Bot accusation detected - engage immediately to defend
                 reply = agent_reply(session_id, session, message["text"])
                 update_session(session_id, message, reply)
                 track_detection(True)  # Count as engagement
-                return {"status": "success", "reply": reply}
+                return {"status": "success", "sessionId": session_id, "reply": reply,
+                        "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
 
-            scam_detected = detect_scam(message["text"], history)
-            
             # 📊 Track detection result
             track_detection(scam_detected)
 
             if scam_detected:
                 reply = agent_reply(session_id, session, message["text"])
                 update_session(session_id, message, reply)
-                return {"status": "success", "reply": reply}
+                return {"status": "success", "sessionId": session_id, "reply": reply,
+                        "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
             
             # Always engage with LLM-generated responses to catch subtle scams
-            # This ensures we don't miss scammers who start with benign messages
             reply = agent_reply(session_id, session, message["text"])
             update_session(session_id, message, reply)
-            return {"status": "success", "reply": reply}
+            return {"status": "success", "sessionId": session_id, "reply": reply,
+                    "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
 
     except HTTPException:
         # Let FastAPI handle auth errors properly

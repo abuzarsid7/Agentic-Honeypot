@@ -62,9 +62,14 @@ def extract_obfuscated_urls(text: str) -> List[str]:
         deobf = url.replace('[.]', '.').replace('(.)', '.').replace('[dot]', '.')
         urls.append(deobf)
     
+    # Mask email/UPI @domain parts before Patterns 3 & 4 to avoid false positives.
+    # e.g. user@gmail.com → the "gmail.com" part would otherwise be captured as a URL.
+    text_safe = re.sub(r'@[\w.\-]+', '@MASKED', text)
+    text_safe_lower = re.sub(r'@[\w.\-]+', '@MASKED', text_lower)
+
     # Pattern 3: Spelled out URLs (google dot com slash something)
     spelled_pattern = r'([\w\-]+)\s+(?:dot|DOT)\s+([\w]+)(?:\s+(?:slash|/)\s+([\w\-]+))?'
-    spelled_urls = re.findall(spelled_pattern, text, re.IGNORECASE)
+    spelled_urls = re.findall(spelled_pattern, text_safe, re.IGNORECASE)
     for match in spelled_urls:
         domain, tld, path = match
         url = f"http://{domain}.{tld}"
@@ -74,7 +79,7 @@ def extract_obfuscated_urls(text: str) -> List[str]:
     
     # Pattern 4: Spaced URLs (example . com)
     spaced_pattern = r'([\w\-]+)\s*\.\s*([\w]+)(?:\s*/\s*([\w\-]+))?'
-    spaced_urls = re.findall(spaced_pattern, text_lower)
+    spaced_urls = re.findall(spaced_pattern, text_safe_lower)
     for match in spaced_urls:
         domain, tld, path = match
         # Avoid false positives (like "5. com" or common phrases)
@@ -190,7 +195,7 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
         system_prompt = """You are an intelligence extraction assistant. Extract the following from the given text:
 1. UPI IDs (format: xyz@bank)
 2. Phone numbers (10-12 digits, any format)
-3. URLs/Links (any format, including obfuscated)
+3. URLs/Links — ONLY actual web URLs (http, https, www, hxxp, or domain[.]tld format). Do NOT include UPI IDs (user@bank) or email addresses here.
 4. Bank account numbers (8-16 digits)
 5. Names — ONLY actual human person names (first name, last name, or full name). Examples: "Rajesh Kumar", "Priya", "Sharma".
    Do NOT include: titles alone ("Officer", "Inspector"), organization names ("Amazon", "SBI"), roles ("customer support"), or generic words.
@@ -388,6 +393,23 @@ def merge_and_deduplicate(
             if normalized and normalized not in seen_orders:
                 seen_orders.add(normalized)
                 merged["orderNumbers"].append(order.strip())
+
+    # Cross-field dedup: remove any phishing link that is just the domain of a known
+    # UPI ID or email address (e.g. http://gmail.com appearing because user@gmail.com
+    # was captured by the spaced-URL pattern).
+    at_domains: Set[str] = set()
+    for upi in merged["upiIds"]:
+        if '@' in upi:
+            at_domains.add(upi.split('@', 1)[1].lower().strip())
+    for email in merged["emails"]:
+        if '@' in email:
+            at_domains.add(email.split('@', 1)[1].lower().strip())
+
+    def _link_is_bare_domain(url: str) -> bool:
+        stripped = re.sub(r'^https?://', '', url).rstrip('/')
+        return stripped.lower() in at_domains
+
+    merged["phishingLinks"] = [u for u in merged["phishingLinks"] if not _link_is_bare_domain(u)]
 
     return merged
 

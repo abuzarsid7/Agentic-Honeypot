@@ -54,6 +54,7 @@ def get_session(session_id: str, history: list = None):
         "dialogue_state": ConversationState.INIT,
         "state_turn_count": 0,
         "scam_type": "unknown",
+        "asked_fields": {},
     }
 
     save_session(session_id, session)

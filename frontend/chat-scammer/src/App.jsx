@@ -7,7 +7,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [ended, setEnded] = useState(false);
-  const sessionId = useRef("abz's-session-014");
+  const sessionId = useRef("abz's-session-015");
   const chatRef = useRef(null);
 
   const sendMessage = async () => {
