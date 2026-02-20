@@ -172,7 +172,7 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             if is_bot_accusation:
                 # Bot accusation detected - engage immediately to defend
-                reply = agent_reply(session_id, session, message["text"])
+                reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
                 update_session(session_id, message, reply)
                 track_detection(True)  # Count as engagement
                 return {"status": "success", "sessionId": session_id, "reply": reply,
@@ -182,13 +182,13 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             track_detection(scam_detected)
 
             if scam_detected:
-                reply = agent_reply(session_id, session, message["text"])
+                reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
                 update_session(session_id, message, reply)
                 return {"status": "success", "sessionId": session_id, "reply": reply,
                         "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}
             
             # Always engage with LLM-generated responses to catch subtle scams
-            reply = agent_reply(session_id, session, message["text"])
+            reply = agent_reply(session_id, session, message["text"], known_scam_type=scam_type)
             update_session(session_id, message, reply)
             return {"status": "success", "sessionId": session_id, "reply": reply,
                     "confidence_score": confidence_score, "scam_type": scam_type, "red_flags": red_flags}

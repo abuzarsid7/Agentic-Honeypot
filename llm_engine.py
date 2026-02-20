@@ -623,6 +623,7 @@ def _call_llm(text: str, history: list) -> Optional[Dict]:
             ],
             max_tokens=400,
             temperature=0.1,
+            timeout=8.0,
         )
 
         content = response.choices[0].message.content.strip()

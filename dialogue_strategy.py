@@ -743,6 +743,7 @@ def _generate_llm_response(
             ],
             max_tokens=120,
             temperature=0.8,
+            timeout=8.0,
         )
 
         reply = response.choices[0].message.content.strip()

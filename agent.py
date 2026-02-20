@@ -36,13 +36,14 @@ Frame questions naturally as a confused person would:
 "What is the case reference number?", "What is the UPI ID I should use?"
 """
 
-def agent_reply(session_id, session, scammer_text):
+def agent_reply(session_id, session, scammer_text, known_scam_type: str = None):
     # 1. Extract intelligence
     extract_intel(session, scammer_text)
     
-    # 1b. Detect scam type (runs LLM analysis) and persist to session
-    #     Only update if currently unknown or on every message to refine
-    if session.get("scam_type", "unknown") == "unknown" or session.get("messages", 0) < 5:
+    # 1b. Detect scam type — skip if already provided by caller
+    if known_scam_type and known_scam_type != "unknown":
+        session["scam_type"] = known_scam_type
+    elif session.get("scam_type", "unknown") == "unknown" or session.get("messages", 0) < 5:
         try:
             history = session.get("history", [])
             analysis = analyze_message(scammer_text, history)

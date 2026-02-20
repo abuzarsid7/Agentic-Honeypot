@@ -223,6 +223,7 @@ Example:
             ],
             max_tokens=400,
             temperature=0.1,
+            timeout=8.0,
         )
         
         content = response.choices[0].message.content.strip()
@@ -560,10 +561,37 @@ def extract_intel(session, text):
     
     # ═══════════════════════════════════════════════════════════
     # STEP 3: LLM-BASED EXTRACTION
+    # Only run if regex/advanced patterns did not already find intel.
+    # Names are LLM-only so we always call if the message looks like it
+    # could contain a person name (message longer than 15 chars).
+    # This avoids an unnecessary network call on every short numeric message.
     # ═══════════════════════════════════════════════════════════
-    
+
+    _regex_found_any = any([
+        regex_results["upiIds"],
+        regex_results["phoneNumbers"],
+        regex_results["phishingLinks"],
+        regex_results["bankAccounts"],
+        regex_results["emails"],
+        regex_results["caseIds"],
+        regex_results["policyNumbers"],
+        regex_results["orderNumbers"],
+        advanced_results["phoneNumbers"],
+        advanced_results["phishingLinks"],
+    ])
+    _msg_may_have_name = len(text_clean) > 15
+
+    # Skip LLM extraction only when regex already captured everything AND
+    # the message is short enough that a name is unlikely.
+    _run_llm_extraction = (not _regex_found_any) or _msg_may_have_name
+
     history = session.get("history", [])
-    llm_results = extract_intel_with_llm(text, history)
+    llm_results = extract_intel_with_llm(text, history) if _run_llm_extraction else {
+        "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
+        "bankAccounts": [], "names": [], "emails": [],
+        "caseIds": [], "policyNumbers": [], "orderNumbers": [],
+        "source": "skipped",
+    }
     
     # ═══════════════════════════════════════════════════════════
     # STEP 4: MERGE & DEDUPLICATE
