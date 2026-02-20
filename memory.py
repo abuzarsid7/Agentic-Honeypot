@@ -6,6 +6,7 @@ Tracks conversation state, extracted intelligence, and dialogue strategy state.
 from dialogue_strategy import ConversationState
 
 import json
+import time
 from redis_client import redis_client
 
 SESSION_TTL = 3600  # 1 hour
@@ -38,23 +39,21 @@ def get_session(session_id: str, history: list = None):
     session = {
         "history": history or [],
         "scam_score": 0.5,
+        "start_time": time.time(),
         "intel": {
             "phoneNumbers": [],
             "upiIds": [],
-            "cryptoWallets": [],
             "phishingLinks": [],
             "bankAccounts": [],
-            "suspiciousKeywords": [],
             "names": [],
             "emails": [],
-            "telegramHandles": [],
-            "scamCategory": [],
-            "psychologicalTactics": [],
-            "ifscCodes": [],
+            "caseIds": [],
+            "policyNumbers": [],
+            "orderNumbers": [],
         },
         "dialogue_state": ConversationState.INIT,
         "state_turn_count": 0,
-        "message_hashes": {},  # {hash: count} for deduplication
+        "scam_type": "unknown",
     }
 
     save_session(session_id, session)
@@ -91,25 +90,21 @@ def update_session(session_id: str, message: dict, reply: str):
         message: Incoming scammer message dict
         reply: Honeypot's reply text
     """
-    import hashlib
     
     # Get latest session from Redis
     session = get_session(session_id)
     
     # Append message exchange to history
-    session["history"].append(message)
+    now = time.time()
+    msg_with_ts = {**message}
+    if "timestamp" not in msg_with_ts:
+        msg_with_ts["timestamp"] = now
+    session["history"].append(msg_with_ts)
     session["history"].append({
         "sender": "user",
-        "text": reply
+        "text": reply,
+        "timestamp": now,
     })
-    
-    # Track message hashes for deduplication
-    if "message_hashes" not in session:
-        session["message_hashes"] = {}
-    
-    # Hash the scammer message
-    msg_hash = hashlib.sha256(message.get("text", "").encode()).hexdigest()[:8]
-    session["message_hashes"][msg_hash] = session["message_hashes"].get(msg_hash, 0) + 1
     
     # Save back to Redis
     save_session(session_id, session)

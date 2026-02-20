@@ -325,13 +325,11 @@ def debug_strategy(payload: dict, x_api_key: str = Header(None)):
         "phone_numbers": len(intel.get("phoneNumbers", [])),
         "phishing_links": len(intel.get("phishingLinks", [])),
         "bank_accounts": len(intel.get("bankAccounts", [])),
-        "suspicious_keywords": len(intel.get("suspiciousKeywords", [])),
         "names": len(intel.get("names", [])),
         "emails": len(intel.get("emails", [])),
-        "telegram_handles": len(intel.get("telegramHandles", [])),
-        "scam_category": len(intel.get("scamCategory", [])),
-        "psychological_tactics": len(intel.get("psychologicalTactics", [])),
-        "ifsc_codes": len(intel.get("ifscCodes", [])),
+        "case_ids": len(intel.get("caseIds", [])),
+        "policy_numbers": len(intel.get("policyNumbers", [])),
+        "order_numbers": len(intel.get("orderNumbers", [])),
     }
     
     # Get recent micro-behaviors (last 5 responses)
@@ -405,25 +403,41 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
     text_clean = normalize_whitespace(text_clean)
     text_lower = text_clean.lower()
     
-    # REGEX extraction
-    all_emails = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', text_clean)
-    upi_ids = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
+    # REGEX extraction — UPI vs email classification
+    _UPI_SUFFIXES = {
+        'paytm', 'ybl', 'okhdfcbank', 'okaxis', 'oksbi', 'okicici',
+        'upi', 'sbi', 'hdfcbank', 'icici', 'axisbank', 'kotak',
+        'pnb', 'gpay', 'phonepe', 'apl', 'ratn', 'barodampay',
+        'ibl', 'axl', 'pingpay', 'freecharge', 'waaxis', 'wasbi',
+        'wahdfcbank', 'waicici', 'abfspay', 'ikwik', 'jupiteraxis',
+        'yesbankltd', 'yesbank', 'federal', 'rbl', 'dbs', 'indus',
+        'citi', 'hsbc', 'sc', 'idbi', 'unionbank', 'boi', 'cnrb',
+        'idfcbank', 'aubank', 'dlb', 'cub', 'kvb', 'tmb', 'jio',
+        'slice', 'niyoicici', 'postbank', 'finobank', 'kkbk',
+        'imobile', 'mahb', 'indianbank', 'psb', 'uboi', 'cbin',
+    }
+    all_at_tokens = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+', text_clean)
+    upi_ids = []
+    email_list = []
+    for token in all_at_tokens:
+        local, domain = token.rsplit('@', 1)
+        domain_lower = domain.lower()
+        if domain_lower in _UPI_SUFFIXES or '.' not in domain:
+            upi_ids.append(token)
+        elif re.match(r'^[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$', domain):
+            email_list.append(token)
     upi_set = set(u.lower() for u in upi_ids)
-    telegram_handles_raw = re.findall(r'(?:^|\s)@([a-zA-Z][a-zA-Z0-9_]{4,31})\b', text_clean)
-    _UPI_SUFFIXES = {'paytm', 'ybl', 'okaxis', 'oksbi', 'okicici', 'upi', 'sbi',
-                     'hdfcbank', 'icici', 'axisbank', 'kotak', 'pnb', 'gpay', 'phonepe'}
+    email_list = [e for e in email_list if e.lower() not in upi_set]
     regex_results = {
         "upiIds": upi_ids,
         "phoneNumbers": re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean),
         "phishingLinks": [link.rstrip('.,;:!?)') for link in re.findall(r"https?://\S+", text_clean)],
         "bankAccounts": [acc for acc in re.findall(r"\b\d{8,16}\b", text_clean) if len(acc) != 10],
-        "suspiciousKeywords": [kw for kw in ['upi', 'verify', 'urgent', 'blocked', 'otp', 'cvv'] if kw in text_lower],
         "names": [],
-        "emails": [e for e in all_emails if e.lower() not in upi_set],
-        "telegramHandles": [f"@{h}" for h in telegram_handles_raw if h.lower() not in _UPI_SUFFIXES],
-        "scamCategory": [],
-        "psychologicalTactics": [],
-        "ifscCodes": re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text_clean),
+        "emails": email_list,
+        "caseIds": [],
+        "policyNumbers": [],
+        "orderNumbers": [],
     }
     
     # ADVANCED extraction
@@ -432,13 +446,11 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
         "phoneNumbers": extract_split_numbers(text) + extract_number_words(text),
         "phishingLinks": extract_obfuscated_urls(text),
         "bankAccounts": [],
-        "suspiciousKeywords": [],
         "names": [],
         "emails": [],
-        "telegramHandles": [],
-        "scamCategory": [],
-        "psychologicalTactics": [],
-        "ifscCodes": [],
+        "caseIds": [],
+        "policyNumbers": [],
+        "orderNumbers": [],
     }
     
     # LLM extraction
@@ -476,13 +488,11 @@ def debug_intelligence(payload: dict, x_api_key: str = Header(None)):
             "phones": len(merged["phoneNumbers"]),
             "urls": len(merged["phishingLinks"]),
             "accounts": len(merged["bankAccounts"]),
-            "keywords": len(merged["suspiciousKeywords"]),
             "names": len(merged.get("names", [])),
             "emails": len(merged.get("emails", [])),
-            "telegram_handles": len(merged.get("telegramHandles", [])),
-            "scam_category": len(merged.get("scamCategory", [])),
-            "psychological_tactics": len(merged.get("psychologicalTactics", [])),
-            "ifsc_codes": len(merged.get("ifscCodes", [])),
+            "case_ids": len(merged.get("caseIds", [])),
+            "policy_numbers": len(merged.get("policyNumbers", [])),
+            "order_numbers": len(merged.get("orderNumbers", [])),
             "results": merged
         },
         "deduplication_stats": {
@@ -531,13 +541,11 @@ def debug_intel_score(payload: dict, x_api_key: str = Header(None)):
                 "phoneNumbers": [],
                 "phishingLinks": [],
                 "bankAccounts": [],
-                "suspiciousKeywords": [],
                 "names": [],
                 "emails": [],
-                "telegramHandles": [],
-                "scamCategory": [],
-                "psychologicalTactics": [],
-                "ifscCodes": [],
+                "caseIds": [],
+                "policyNumbers": [],
+                "orderNumbers": [],
             }),
             "history": payload.get("history", []),
             "intel_extraction_history": payload.get("intel_extraction_history", [])

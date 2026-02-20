@@ -168,9 +168,9 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
     """
     _empty = {
         "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
-        "bankAccounts": [], "suspiciousKeywords": [],
-        "names": [], "emails": [], "telegramHandles": [],
-        "scamCategory": [], "psychologicalTactics": [], "ifscCodes": [],
+        "bankAccounts": [],
+        "names": [], "emails": [],
+        "caseIds": [], "policyNumbers": [], "orderNumbers": [],
     }
     # Check if LLM is available (API keys set)
     if not (os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")):
@@ -178,11 +178,13 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
     
     try:
         # Import LLM engine (only if available)
-        from llm_engine import _get_llm_client, _call_llm
+        from llm_engine import _get_llm_client
         
-        client = _get_llm_client()
-        if not client:
+        provider_info = _get_llm_client()
+        if not provider_info:
             return {**_empty, "source": "llm_unavailable"}
+        
+        client, model, label = provider_info
         
         # Build extraction prompt
         system_prompt = """You are an intelligence extraction assistant. Extract the following from the given text:
@@ -190,42 +192,59 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
 2. Phone numbers (10-12 digits, any format)
 3. URLs/Links (any format, including obfuscated)
 4. Bank account numbers (8-16 digits)
-5. Suspicious keywords
-6. Names — any person names mentioned (scammer name, fake officer name, etc.)
-7. Emails — standard email addresses
-8. Telegram handles — @username style handles
-9. Scam category — classify the scam type(s): kyc_fraud, bank_impersonation, phishing, payment_fraud, lottery_scam, tech_support_scam, investment_scam, impersonation, job_scam
-10. Psychological tactics — detect manipulation tactics used: urgency, fear, authority, trust_building, greed, social_proof, scarcity, emotional_manipulation
-11. IFSC codes — Indian bank branch codes (format: 4 letters + 0 + 6 alphanumeric, e.g. SBIN0001234)
+5. Names — ONLY actual human person names (first name, last name, or full name). Examples: "Rajesh Kumar", "Priya", "Sharma".
+   Do NOT include: titles alone ("Officer", "Inspector"), organization names ("Amazon", "SBI"), roles ("customer support"), or generic words.
+   If a title accompanies a person name, include only the person name part (e.g. "Officer Vikram Singh" → extract "Vikram Singh").
+6. Emails — standard email addresses
+7. Case IDs / Reference numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024)
+8. Policy numbers (e.g. POL-123456, LIC12345678)
+9. Order numbers (e.g. ORD-12345, AWB1234567890)
 
-Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, suspiciousKeywords, names, emails, telegramHandles, scamCategory, psychologicalTactics, ifscCodes.
+Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, names, emails, caseIds, policyNumbers, orderNumbers.
 Each should be an array of strings. Extract ALL instances, even if obfuscated or split.
+IMPORTANT for names: Only extract strings that are clearly human person names. If no person name is mentioned, return an empty array for names. Do NOT guess or infer names from context.
 
 Example:
-{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": [], "suspiciousKeywords": ["urgent", "verify"], "names": ["Rajesh Kumar"], "emails": [], "telegramHandles": ["@scammer_bot"], "scamCategory": ["kyc_fraud"], "psychologicalTactics": ["urgency", "authority"], "ifscCodes": ["SBIN0001234"]}"""
+{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": [], "names": ["Rajesh Kumar"], "emails": [], "caseIds": ["REF-20230001"], "policyNumbers": [], "orderNumbers": []}"""
         
         user_prompt = f"Extract intelligence from this scammer message:\n\n{text}\n\nReturn JSON only."
         
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
+        # Call LLM directly with the extraction prompt
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_tokens=400,
+            temperature=0.1,
+        )
         
-        # Call LLM
-        result = _call_llm(client, messages)
+        content = response.choices[0].message.content.strip()
+        
+        # Strip markdown fences if LLM wraps output
+        if content.startswith("```"):
+            content = re.sub(r"^```(?:json)?\s*", "", content)
+            content = re.sub(r"\s*```$", "", content)
+        
+        result = json.loads(content)
         
         if result and isinstance(result, dict):
             # Add source indicator
             result["source"] = "llm"
-            # Ensure all expected keys exist
+            # Ensure all expected keys exist and values are lists
             for k in _empty:
-                if k not in result:
+                if k not in result or not isinstance(result[k], list):
                     result[k] = []
             return result
         else:
             return {**_empty, "source": "llm_error"}
     
+    except json.JSONDecodeError as e:
+        print(f"⚠️  LLM extraction returned invalid JSON: {e}")
+        return {**_empty, "source": "llm_error"}
     except Exception as e:
+        print(f"⚠️  LLM extraction failed ({type(e).__name__}): {e}")
         return {**_empty, "source": "llm_error"}
 
 
@@ -280,13 +299,11 @@ def merge_and_deduplicate(
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
-        "suspiciousKeywords": [],
         "names": [],
         "emails": [],
-        "telegramHandles": [],
-        "scamCategory": [],
-        "psychologicalTactics": [],
-        "ifscCodes": [],
+        "caseIds": [],
+        "policyNumbers": [],
+        "orderNumbers": [],
     }
     
     # Merge UPI IDs (case-insensitive dedup)
@@ -327,15 +344,6 @@ def merge_and_deduplicate(
                     seen_accounts.add(normalized)
                     merged["bankAccounts"].append(normalized)
     
-    # Merge keywords (case-insensitive dedup)
-    seen_keywords: Set[str] = set()
-    for source in [regex_results, advanced_results, llm_results]:
-        for keyword in source.get("suspiciousKeywords", []):
-            normalized = keyword.lower().strip()
-            if normalized and normalized not in seen_keywords:
-                seen_keywords.add(normalized)
-                merged["suspiciousKeywords"].append(normalized)
-    
     # Merge names (case-insensitive dedup, title case)
     seen_names: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
@@ -354,44 +362,33 @@ def merge_and_deduplicate(
                 seen_emails.add(normalized)
                 merged["emails"].append(normalized)
     
-    # Merge Telegram handles (case-insensitive dedup)
-    seen_handles: Set[str] = set()
+    # Merge case IDs (case-insensitive dedup)
+    seen_case_ids: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
-        for handle in source.get("telegramHandles", []):
-            normalized = handle.lower().strip()
-            if not normalized.startswith('@'):
-                normalized = '@' + normalized
-            if normalized not in seen_handles and len(normalized) > 2:
-                seen_handles.add(normalized)
-                merged["telegramHandles"].append(normalized)
-    
-    # Merge scam categories (dedup)
-    seen_categories: Set[str] = set()
+        for cid in source.get("caseIds", []):
+            normalized = cid.strip().upper()
+            if normalized and normalized not in seen_case_ids:
+                seen_case_ids.add(normalized)
+                merged["caseIds"].append(cid.strip())
+
+    # Merge policy numbers (case-insensitive dedup)
+    seen_policy: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
-        for cat in source.get("scamCategory", []):
-            normalized = cat.lower().strip()
-            if normalized and normalized not in seen_categories:
-                seen_categories.add(normalized)
-                merged["scamCategory"].append(normalized)
-    
-    # Merge psychological tactics (dedup)
-    seen_tactics: Set[str] = set()
+        for pol in source.get("policyNumbers", []):
+            normalized = pol.strip().upper()
+            if normalized and normalized not in seen_policy:
+                seen_policy.add(normalized)
+                merged["policyNumbers"].append(pol.strip())
+
+    # Merge order numbers (case-insensitive dedup)
+    seen_orders: Set[str] = set()
     for source in [regex_results, advanced_results, llm_results]:
-        for tactic in source.get("psychologicalTactics", []):
-            normalized = tactic.lower().strip()
-            if normalized and normalized not in seen_tactics:
-                seen_tactics.add(normalized)
-                merged["psychologicalTactics"].append(normalized)
-    
-    # Merge IFSC codes (uppercase dedup)
-    seen_ifsc: Set[str] = set()
-    for source in [regex_results, advanced_results, llm_results]:
-        for code in source.get("ifscCodes", []):
-            normalized = code.upper().strip()
-            if normalized and normalized not in seen_ifsc and re.match(r'^[A-Z]{4}0[A-Z0-9]{6}$', normalized):
-                seen_ifsc.add(normalized)
-                merged["ifscCodes"].append(normalized)
-    
+        for order in source.get("orderNumbers", []):
+            normalized = order.strip().upper()
+            if normalized and normalized not in seen_orders:
+                seen_orders.add(normalized)
+                merged["orderNumbers"].append(order.strip())
+
     return merged
 
 
@@ -425,82 +422,95 @@ def extract_intel(session, text):
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
-        "suspiciousKeywords": [],
         "names": [],
         "emails": [],
-        "telegramHandles": [],
-        "scamCategory": [],
-        "psychologicalTactics": [],
-        "ifscCodes": [],
+        "caseIds": [],
+        "policyNumbers": [],
+        "orderNumbers": [],
     }
     
-    # Extract UPI IDs
-    regex_results["upiIds"] = re.findall(r"[a-zA-Z0-9.\-_]{2,}@[a-zA-Z]{2,}", text_clean)
-    
+    # ── Known UPI handle suffixes ──
+    _UPI_SUFFIXES = {
+        'paytm', 'ybl', 'okhdfcbank', 'okaxis', 'oksbi', 'okicici',
+        'upi', 'sbi', 'hdfcbank', 'icici', 'axisbank', 'kotak',
+        'pnb', 'gpay', 'phonepe', 'apl', 'ratn', 'barodampay',
+        'ibl', 'axl', 'pingpay', 'freecharge', 'waaxis', 'wasbi',
+        'wahdfcbank', 'waicici', 'abfspay', 'ikwik', 'jupiteraxis',
+        'yesbankltd', 'yesbank', 'federal', 'rbl', 'dbs', 'indus',
+        'citi', 'hsbc', 'sc', 'idbi', 'unionbank', 'boi', 'cnrb',
+        'idfcbank', 'aubank', 'dlb', 'cub', 'kvb', 'tmb', 'jio',
+        'slice', 'niyoicici', 'postbank', 'finobank', 'kkbk',
+        'imobile', 'mahb', 'indianbank', 'psb', 'uboi', 'cbin',
+    }
+
+    # Step A: Extract ALL @-tokens from text
+    all_at_tokens = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+', text_clean)
+
+    # Step B: Classify each token as UPI or email
+    upi_ids = []
+    emails = []
+    for token in all_at_tokens:
+        local, domain = token.rsplit('@', 1)
+        domain_lower = domain.lower()
+        # It's a UPI ID if:
+        #   1) The domain is a known UPI suffix, OR
+        #   2) The domain has NO dot (e.g. xyz@something — not an email pattern)
+        if domain_lower in _UPI_SUFFIXES:
+            upi_ids.append(token)
+        elif '.' not in domain:
+            # No dot in domain → likely UPI (e.g. custom@bank), not email
+            upi_ids.append(token)
+        else:
+            # Has a dot → standard email (e.g. user@gmail.com)
+            # Validate it looks like an email (domain.tld)
+            if re.match(r'^[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$', domain):
+                emails.append(token)
+
+    # Deduplicate: remove any email that was also matched as UPI
+    upi_set = set(u.lower() for u in upi_ids)
+    emails = [e for e in emails if e.lower() not in upi_set]
+
+    regex_results["upiIds"] = upi_ids
+    regex_results["emails"] = emails
+
     # Extract phone numbers (+91xxxxxxxxxx, 91xxxxxxxxxx, or 10-digit)
-    regex_results["phoneNumbers"] = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<![\d])\d{10}(?![\d])", text_clean)
-    
+    regex_results["phoneNumbers"] = re.findall(r"\+?91\d{10}|\+\d{10,}|(?<!\d)\d{10}(?!\d)", text_clean)
+
     # Extract URLs
     links = re.findall(r"https?://\S+", text_clean)
     regex_results["phishingLinks"] = [link.rstrip('.,;:!?)') for link in links]
-    
+
     # Extract account numbers (8-16 digits, but not 10-digit phone numbers)
     accounts = re.findall(r"\b\d{8,16}\b", text_clean)
     regex_results["bankAccounts"] = [acc for acc in accounts if len(acc) != 10]
-    
-    # Extract emails (exclude UPI IDs already matched)
-    all_emails = re.findall(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}', text_clean)
-    upi_set = set(u.lower() for u in regex_results["upiIds"])
-    regex_results["emails"] = [e for e in all_emails if e.lower() not in upi_set]
-    
-    # Extract Telegram handles (@username, 5-32 chars, alphanumeric + underscores)
-    telegram_handles = re.findall(r'(?:^|\s)@([a-zA-Z][a-zA-Z0-9_]{4,31})\b', text_clean)
-    # Filter out known UPI handle suffixes to avoid false positives
-    _UPI_SUFFIXES = {'paytm', 'ybl', 'okaxis', 'oksbi', 'okicici', 'upi', 'sbi',
-                     'hdfcbank', 'icici', 'axisbank', 'kotak', 'pnb', 'gpay', 'phonepe'}
-    regex_results["telegramHandles"] = [
-        f"@{h}" for h in telegram_handles if h.lower() not in _UPI_SUFFIXES
-    ]
-    
-    # Extract keywords
-    keywords = [
-        'upi', 'verify', 'urgent', 'blocked', 'suspended', 'kyc',
-        'otp', 'cvv', 'pin', 'password', 'expire', 'immediately',
-        'customer care', 'refund', 'wallet', 'paytm', 'phonepe', 'gpay'
-    ]
-    regex_results["suspiciousKeywords"] = [kw for kw in keywords if kw in text_lower]
-    
-    # Classify scam category from keywords and text patterns
-    _SCAM_CATEGORIES = {
-        'kyc_fraud': ['kyc', 'verify', 'verification', 'update kyc', 'aadhaar', 'pan'],
-        'bank_impersonation': ['bank', 'account blocked', 'account suspended', 'customer care', 'rbi'],
-        'phishing': ['click', 'link', 'login', 'password', 'otp'],
-        'payment_fraud': ['upi', 'transfer', 'refund', 'wallet', 'paytm', 'phonepe', 'gpay'],
-        'lottery_scam': ['lottery', 'prize', 'winner', 'congratulations', 'won'],
-        'tech_support_scam': ['virus', 'malware', 'remote access', 'teamviewer', 'anydesk'],
-        'investment_scam': ['invest', 'guaranteed returns', 'profit', 'trading', 'crypto', 'bitcoin'],
-    }
-    for category, triggers in _SCAM_CATEGORIES.items():
-        if any(t in text_lower for t in triggers):
-            regex_results["scamCategory"].append(category)
-    
-    # Detect psychological tactics
-    _PSYCH_TACTICS = {
-        'urgency': ['urgent', 'immediately', 'now', 'expire', 'hurry', 'asap', 'deadline', 'last chance'],
-        'fear': ['blocked', 'suspended', 'closed', 'legal action', 'arrest', 'police', 'penalty', 'fine'],
-        'authority': ['rbi', 'government', 'official', 'department', 'ministry', 'officer', 'manager'],
-        'trust_building': ['dear customer', 'valued', 'we care', 'for your safety', 'secure', 'trusted'],
-        'greed': ['prize', 'lottery', 'cashback', 'bonus', 'free', 'reward', 'offer', 'guaranteed'],
-        'social_proof': ['many customers', 'everyone', 'other users', 'verified by'],
-        'scarcity': ['limited time', 'only today', 'few left', 'exclusive', 'one-time'],
-    }
-    for tactic, triggers in _PSYCH_TACTICS.items():
-        if any(t in text_lower for t in triggers):
-            regex_results["psychologicalTactics"].append(tactic)
-    
-    # Extract IFSC codes (4 letters + 0 + 6 alphanumeric, e.g. SBIN0001234)
-    regex_results["ifscCodes"] = re.findall(r'\b[A-Z]{4}0[A-Z0-9]{6}\b', text_clean)
-    
+
+    # NOTE: Name extraction is handled exclusively by the LLM (Step 3)
+    # because regex-based name extraction produces too many false positives—
+    # common English words after "I am", "this is" etc. get misidentified as names.
+    # The LLM has semantic understanding to distinguish "I am Rajesh" (name)
+    # from "I am calling" (not a name).
+
+    # Extract case IDs / reference numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024, CRN12345678)
+    case_patterns = re.findall(
+        r'\b(?:CASE|REF|FIR|CRN|COMP|CR|TKT|INC|SR|TICKET)[\s\-/#]?\d{3,15}(?:/\d{2,4})?\b',
+        text_clean, re.IGNORECASE
+    )
+    regex_results["caseIds"] = [c.strip() for c in case_patterns]
+
+    # Extract policy numbers (e.g. POL-123456, POLICY/2024/1234, LIC12345678)
+    policy_patterns = re.findall(
+        r'\b(?:POL|POLICY|LIC|INS|PLAN)[\s\-/#]?\d{4,15}(?:/\d{2,4})?\b',
+        text_clean, re.IGNORECASE
+    )
+    regex_results["policyNumbers"] = [p.strip() for p in policy_patterns]
+
+    # Extract order numbers (e.g. ORD-12345, ORDER#9876543, AWB1234567890)
+    order_patterns = re.findall(
+        r'\b(?:ORD|ORDER|AWB|TRACK|TRK|SHIP|PKG)[\s\-/#]?\d{4,15}\b',
+        text_clean, re.IGNORECASE
+    )
+    regex_results["orderNumbers"] = [o.strip() for o in order_patterns]
+
     # ═══════════════════════════════════════════════════════════
     # STEP 2: ADVANCED PATTERN EXTRACTION
     # ═══════════════════════════════════════════════════════════
@@ -510,13 +520,11 @@ def extract_intel(session, text):
         "phoneNumbers": [],
         "phishingLinks": [],
         "bankAccounts": [],
-        "suspiciousKeywords": [],
         "names": [],
         "emails": [],
-        "telegramHandles": [],
-        "scamCategory": [],
-        "psychologicalTactics": [],
-        "ifscCodes": [],
+        "caseIds": [],
+        "policyNumbers": [],
+        "orderNumbers": [],
     }
     
     # Extract obfuscated URLs
@@ -596,11 +604,6 @@ def extract_intel(session, text):
             session["intel"]["bankAccounts"].append(account)
             new_counts["account"] += 1
     
-    # Add keywords
-    for keyword in merged["suspiciousKeywords"]:
-        if keyword not in session["intel"]["suspiciousKeywords"]:
-            session["intel"]["suspiciousKeywords"].append(keyword)
-    
     # Add names
     for name in merged.get("names", []):
         if name not in session["intel"].get("names", []):
@@ -611,26 +614,21 @@ def extract_intel(session, text):
         if email not in session["intel"].get("emails", []):
             session["intel"].setdefault("emails", []).append(email)
     
-    # Add Telegram handles
-    for handle in merged.get("telegramHandles", []):
-        if handle not in session["intel"].get("telegramHandles", []):
-            session["intel"].setdefault("telegramHandles", []).append(handle)
-    
-    # Add scam categories
-    for cat in merged.get("scamCategory", []):
-        if cat not in session["intel"].get("scamCategory", []):
-            session["intel"].setdefault("scamCategory", []).append(cat)
-    
-    # Add psychological tactics
-    for tactic in merged.get("psychologicalTactics", []):
-        if tactic not in session["intel"].get("psychologicalTactics", []):
-            session["intel"].setdefault("psychologicalTactics", []).append(tactic)
-    
-    # Add IFSC codes
-    for code in merged.get("ifscCodes", []):
-        if code not in session["intel"].get("ifscCodes", []):
-            session["intel"].setdefault("ifscCodes", []).append(code)
-    
+    # Add case IDs
+    for cid in merged.get("caseIds", []):
+        if cid not in session["intel"].get("caseIds", []):
+            session["intel"].setdefault("caseIds", []).append(cid)
+
+    # Add policy numbers
+    for pol in merged.get("policyNumbers", []):
+        if pol not in session["intel"].get("policyNumbers", []):
+            session["intel"].setdefault("policyNumbers", []).append(pol)
+
+    # Add order numbers
+    for order in merged.get("orderNumbers", []):
+        if order not in session["intel"].get("orderNumbers", []):
+            session["intel"].setdefault("orderNumbers", []).append(order)
+
     # Track telemetry
     if new_counts["upi"] > 0:
         track_intelligence("upi", new_counts["upi"])
@@ -693,8 +691,9 @@ def calculate_intel_score(session: dict) -> dict:
         len(intel.get("bankAccounts", [])) +
         len(intel.get("names", [])) +
         len(intel.get("emails", [])) +
-        len(intel.get("telegramHandles", [])) +
-        min(len(intel.get("suspiciousKeywords", [])), 5)  # Cap keywords at 5
+        len(intel.get("caseIds", [])) +
+        len(intel.get("policyNumbers", [])) +
+        len(intel.get("orderNumbers", []))
     )
     
     # Diversity bonus: having multiple types is better than many of one type
@@ -705,7 +704,9 @@ def calculate_intel_score(session: dict) -> dict:
         1 if intel.get("bankAccounts", []) else 0,
         1 if intel.get("names", []) else 0,
         1 if intel.get("emails", []) else 0,
-        1 if intel.get("telegramHandles", []) else 0,
+        1 if intel.get("caseIds", []) else 0,
+        1 if intel.get("policyNumbers", []) else 0,
+        1 if intel.get("orderNumbers", []) else 0,
     ])
     diversity_multiplier = 1.0 + (types_collected * 0.15)  # +15% per type
     

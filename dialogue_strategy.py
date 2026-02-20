@@ -205,164 +205,10 @@ def add_correction(response: str) -> str:
     return response
 
 
-# ═══════════════════════════════════════════════════════════════
-# PERSISTENCE / REPETITION DETECTION FROM MEMORY
-# ═══════════════════════════════════════════════════════════════
-
-# Semantic categories a scammer may repeat persistently
-_PERSISTENCE_CATEGORIES = {
-    "payment_demand": [
-        r'\b(send|pay|transfer|deposit|upi|amount|rs|rupees?|₹)\b',
-    ],
-    "link_push": [
-        r'\b(click|link|open|visit|url|website|verify.*(link|site))\b',
-        r'https?://',
-    ],
-    "urgency_threat": [
-        r'\b(urgent|immediately|now|quick|asap|hurry|expire|deadline|today|right\s*now|last\s+chance)\b',
-    ],
-    "authority_pressure": [
-        r'\b(officer|inspector|manager|police|arrest|legal|fir|case|court|government|rbi|suspend|block)\b',
-    ],
-    "credential_request": [
-        r'\b(otp|pin|password|cvv|card\s*number|aadhar|pan|login)\b',
-    ],
-}
 
 
-def detect_repetition_from_memory(session: Dict) -> Dict:
-    """
-    Analyse the conversation memory to detect scammer *persistence*.
-
-    Checks two axes:
-    1. **Exact repetition** – via `message_hashes` (same message sent > 1×).
-    2. **Semantic repetition** – the same *category* of demand appearing
-       in 2+ of the last 4 scammer messages.
-
-    Returns a dict with:
-        is_persistent (bool)  – True if any persistence detected
-        exact_repeats (int)   – number of exactly-repeated messages
-        persistent_categories (list[str]) – categories being repeated
-        pressure_level (float) – 0.0-1.0 severity
-        summary (str)         – human-readable summary for prompt injection
-    """
-    result = {
-        "is_persistent": False,
-        "exact_repeats": 0,
-        "persistent_categories": [],
-        "pressure_level": 0.0,
-        "summary": "",
-    }
-
-    # ── Exact repetition ───────────────────────────────────────
-    hashes = session.get("message_hashes", {})
-    exact_repeats = sum(1 for cnt in hashes.values() if cnt > 1)
-    result["exact_repeats"] = exact_repeats
-
-    # ── Semantic repetition (last 4 scammer messages) ─────────
-    history = session.get("history", [])
-    scammer_msgs = [
-        msg.get("text", "")
-        for msg in history
-        if isinstance(msg, dict) and msg.get("sender") == "scammer"
-    ][-4:]
-
-    if len(scammer_msgs) < 2:
-        return result
-
-    category_hits: Dict[str, int] = {cat: 0 for cat in _PERSISTENCE_CATEGORIES}
-
-    for text in scammer_msgs:
-        text_lower = text.lower()
-        for cat, patterns in _PERSISTENCE_CATEGORIES.items():
-            if any(re.search(p, text_lower) for p in patterns):
-                category_hits[cat] += 1
-
-    repeated_cats = [
-        cat for cat, count in category_hits.items()
-        if count >= 2
-    ]
-
-    result["persistent_categories"] = repeated_cats
-
-    # ── Compute pressure level ─────────────────────────────────
-    pressure = 0.0
-    if exact_repeats > 0:
-        pressure += min(exact_repeats * 0.15, 0.4)
-    pressure += len(repeated_cats) * 0.15
-    # Bonus if urgency + payment together
-    if "urgency_threat" in repeated_cats and "payment_demand" in repeated_cats:
-        pressure += 0.2
-    if "credential_request" in repeated_cats:
-        pressure += 0.15
-    result["pressure_level"] = min(pressure, 1.0)
-
-    result["is_persistent"] = (
-        exact_repeats > 0
-        or len(repeated_cats) > 0
-    )
-
-    # ── Build human-readable summary for the LLM prompt ───────
-    if result["is_persistent"]:
-        parts = []
-        if exact_repeats:
-            parts.append(f"the scammer has sent {exact_repeats} exact-repeat message(s)")
-        if repeated_cats:
-            labels = {
-                "payment_demand": "demanding payment",
-                "link_push": "pushing a link",
-                "urgency_threat": "making urgent threats",
-                "authority_pressure": "claiming authority/legal action",
-                "credential_request": "requesting credentials/OTP",
-            }
-            descs = [labels.get(c, c) for c in repeated_cats]
-            parts.append(f"they keep {', '.join(descs)}")
-        result["summary"] = "The scammer is being persistent: " + "; ".join(parts) + "."
-
-    return result
 
 
-# Responses designed specifically for when persistence is detected.
-# Keyed by the persistence category that is strongest.
-_PERSISTENCE_RESPONSES: Dict[str, List[str]] = {
-    "payment_demand": [
-        "You already told me to pay. I need to think about it, this is a lot of money.",
-        "I heard you the first time about the payment. Let me arrange funds.",
-        "I understand you want me to pay, but I'm still checking with my {person}.",
-        "You keep saying to pay. Can you explain one more time why exactly?",
-        "Please stop rushing me about the money. I need the exact details again.",
-    ],
-    "link_push": [
-        "You already sent me the link. I'm trying to open it but it's slow.",
-        "I saw the link, but my phone is giving a warning. Is there another way?",
-        "I'm having trouble with the link you keep sending. Can you spell the website?",
-        "I clicked the link before but nothing happened. What should I do?",
-    ],
-    "urgency_threat": [
-        "You keep saying it's urgent. But I need to be careful with my money.",
-        "I understand it's urgent, but please don't rush me. I'm confused.",
-        "Every message you send says urgent. That's making me more worried, not faster.",
-        "If it's so urgent, why can't I just visit the branch?",
-    ],
-    "authority_pressure": [
-        "You said you were from {entity} before too. Can you prove it this time?",
-        "You keep mentioning your authority. I just want to verify before I act.",
-        "If you really are an officer, then you'll understand I need time.",
-        "I heard the first time that this is official. But how do I confirm?",
-    ],
-    "credential_request": [
-        "You asked for this information already. I'm scared to share it.",
-        "I'm not comfortable sharing my OTP/PIN again. Is there another way?",
-        "My {person} said never to share OTP with anyone. Why do you need it?",
-        "I already told you I'm not sure about sharing passwords.",
-    ],
-    "_generic": [
-        "You keep repeating the same thing. I need a moment to think.",
-        "I heard you before. Please don't pressure me.",
-        "I understand what you're saying, you told me already. Let me process this.",
-        "You've said this multiple times now. I'm trying my best.",
-    ],
-}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -387,140 +233,139 @@ class ConversationState(str, Enum):
 
 STATE_CONFIG = {
     ConversationState.INIT: {
-        "goal": "Establish victim persona, appear confused and concerned",
-        "extraction_targets": ["narrative_type", "urgency_level", "impersonation_entity"],
+        "goal": "Get the scammer's name, organization, and a case/reference number",
+        "extraction_targets": ["names", "caseIds", "phoneNumbers"],
         "responses": [
-            "Hello? Who is this?",
-            "I'm sorry, I don't understand. What is this about?",
-            "Is this really from {entity}? How do I know this is legitimate?",
-            "This is very sudden. Can you explain what's happening?",
-            "I'm a bit worried. Is there a problem with my account?",
-            "Wait, I need to understand this properly. Start from the beginning.",
+            "Hello? Who is this calling? Can you tell me your full name please?",
+            "I didn't catch that. What is your name and which organization are you from?",
+            "Sorry, what is the reference number or case ID for this matter?",
+            "Can you give me a number I can call back on to verify this?",
+            "What is your employee ID? And what department do you work in?",
+            "I need to note this down. What is the official case number you are referring to?",
         ],
         "max_turns": 2,
     },
     
     ConversationState.PROBE_REASON: {
-        "goal": "Extract scam narrative, authority claims, and urgency tactics",
-        "extraction_targets": ["authority_title", "reference_numbers", "alleged_issue", "deadline"],
+        "goal": "Get their name, case/reference number, phone number to call back, and email for official notice",
+        "extraction_targets": ["names", "caseIds", "phoneNumbers", "emails"],
         "responses": [
-            "Why is my account blocked? I haven't done anything wrong.",
-            "What exactly is the issue? I need to understand the reason.",
-            "Can you give me a reference number or case ID for this?",
-            "Who specifically are you? What's your employee ID or badge number?",
-            "Which department are you calling from? What's the official number?",
-            "How did this happen? I use my account normally.",
-            "Is this issue with all my accounts or just one?",
-            "What triggered this? I haven't received any email about this.",
+            "What is the case number or reference ID for this issue?",
+            "Can you tell me your full name and your employee ID?",
+            "What phone number can I call back on to verify this with your office?",
+            "Can you send me the official notice? What is the email address it will come from?",
+            "What is the direct landline number for your department?",
+            "I want to note your details. What is your name and official email ID?",
+            "Is there a complaint number or FIR number I should know about?",
+            "Which policy or order number is this related to? I have several.",
         ],
         "max_turns": 4,
     },
     
     ConversationState.PROBE_PAYMENT: {
-        "goal": "Extract payment redirection details (UPI, account numbers, amounts)",
-        "extraction_targets": ["upi_ids", "account_numbers", "payment_amounts", "payment_reason"],
+        "goal": "Get the UPI ID, bank account number, beneficiary name, and payment reference number",
+        "extraction_targets": ["upiIds", "bankAccounts", "names", "caseIds"],
         "responses": [
-            "Why do I need to send money? I thought you were helping me?",
-            "How much exactly do I need to pay? And to which account?",
-            "Can you send me the UPI ID? I need to copy it carefully.",
-            "What is this payment for? Is it a fee or penalty?",
-            "Will I get this money back? How long will it take?",
-            "I've never paid like this before. Is there a receipt?",
-            "Can I pay some other way? I'm not comfortable with UPI.",
-            "My son handles my payments. Can I call him first?",
-            "What's the exact amount in numbers? I want to be sure.",
-            "Which bank account should I use to send the money?",
+            "Okay, what is the UPI ID I should send the money to?",
+            "What is the full bank account number and the IFSC code?",
+            "Whose name is the UPI ID registered under?",
+            "Can you tell me the account holder's full name for the bank transfer?",
+            "What is the payment reference number I should mention while transferring?",
+            "What is the beneficiary name that will show when I enter this account number?",
+            "Which bank does this account belong to? What is the branch name?",
+            "Can you also give me your phone number in case the payment fails?",
+            "What receipt or reference number will I get after the payment?",
+            "What is the exact UPI ID? I want to make sure I send to the right place.",
         ],
         "max_turns": 5,
     },
     
     ConversationState.PROBE_LINK: {
-        "goal": "Extract phishing URLs, domains, and social engineering around clicking",
-        "extraction_targets": ["phishing_urls", "domain_names", "link_purpose", "credentials_requested"],
+        "goal": "Get the exact URL/link, the email it was sent from, and any reference numbers",
+        "extraction_targets": ["phishingLinks", "emails", "caseIds"],
         "responses": [
-            "I'm not sure about clicking links in messages. Is this safe?",
-            "What exactly will happen when I click this link?",
-            "Can you tell me the full website address? I want to verify it.",
-            "Is this link from the official {entity} website?",
-            "My antivirus is warning me about this link. Why?",
-            "What information will the website ask for?",
-            "Do I need to enter my password or PIN on this website?",
-            "Can I access this from the official app instead?",
-            "The link looks strange. Can you explain the URL?",
-            "Will clicking this link solve the problem immediately?",
+            "Can you send me the link? I want to see the full URL.",
+            "What is the exact website address I need to open?",
+            "What is the exact URL? I need to copy it carefully.",
+            "Can you email me the link instead? What is your official email address?",
+            "I didn't receive the link. Can you send it again?",
+            "What email address will the link come from? I want to check my inbox.",
+            "Before I click, what is the reference number I should enter on the website?",
+            "Is there a case ID or order number I need to enter on this website?",
+            "Can you share your email ID so I can write to you if the link doesn't work?",
+            "What is the full website address? And what is the customer support number on it?",
         ],
         "max_turns": 4,
     },
     
     ConversationState.STALL: {
-        "goal": "Buy time while extracting additional details, appear hesitant",
-        "extraction_targets": ["alternative_contacts", "supervisor_info", "callback_numbers", "additional_threats"],
+        "goal": "Get callback phone numbers, supervisor names, email addresses, and case reference numbers",
+        "extraction_targets": ["phoneNumbers", "names", "emails", "caseIds"],
         "responses": [
-            "I need to think about this. This is moving very fast.",
-            "Can I call you back in 10 minutes? I need to check something.",
-            "Let me talk to my son first. He knows about these things.",
-            "I'm at work right now. Can we do this later today?",
-            "This is making me very nervous. How do I know this is real?",
-            "Can I visit the branch instead? I prefer doing this in person.",
-            "What happens if I don't do this right now?",
-            "Is there a supervisor I can speak to? I want to confirm everything.",
-            "Let me verify this with customer care first.",
-            "I need to get my reading glasses. Give me a minute.",
-            "Can you send me an official email or SMS about this?",
+            "Let me check with someone first. What number can I call you back on?",
+            "What is your supervisor's name? Can I speak to them?",
+            "Can you give me the official customer care phone number to verify?",
+            "Can you email me the details? What is your official email address?",
+            "I need to think about this. What is the case reference number again?",
+            "What is your direct phone number? I will call you back in 10 minutes.",
+            "My son wants to verify. Can you give me your full name and a callback number?",
+            "What is the toll-free number for {entity}? I want to confirm.",
+            "Can you share the complaint number or ticket ID so I can track this?",
+            "What is your supervisor's name and direct number? I want to verify with them.",
         ],
         "max_turns": 3,
     },
     
     ConversationState.CONFIRM_DETAILS: {
-        "goal": "Make scammer repeat details, verify extracted intelligence",
-        "extraction_targets": ["confirmation_of_previous_intel", "contradictions", "new_details"],
+        "goal": "Extract additional details the scammer hasn't provided yet: email, case ID, policy number, order number",
+        "extraction_targets": ["emails", "caseIds", "policyNumbers", "orderNumbers"],
         "responses": [
-            "Let me repeat back what you said to make sure I understood correctly.",
-            "So the UPI ID is {detail}? Can you confirm that again?",
-            "You mentioned {detail} earlier. Is that still correct?",
-            "Just to be clear, I need to pay {amount} to {recipient}?",
-            "The account number you gave was {detail}. Can you verify?",
-            "You said your name was {name}. What was your employee ID again?",
-            "I wrote down {detail}. Is that exactly right?",
-            "Can you spell out the website address letter by letter?",
-            "What was the reference number you mentioned? I want to note it.",
-            "Before I proceed, let me confirm: {detail}. Correct?",
+            "Okay I have the payment details. But what is the case reference number for this?",
+            "Before I send the money, can you give me your official email address for my records?",
+            "What is the policy number or order number linked to this transaction?",
+            "I want to keep a record. What is the complaint ID or ticket number?",
+            "Also, what email will the receipt come from after I pay?",
+            "What is the official tracking number or order ID for this?",
+            "I need to file this with my bank. What is the FIR or case number?",
+            "Can you give me the customer care email address along with this?",
+            "My son is asking for the insurance or policy number. What is it?",
+            "What is the official reference ID I should keep for this entire process?",
         ],
         "max_turns": 3,
     },
     
     ConversationState.ESCALATE_EXTRACTION: {
-        "goal": "Push for phone numbers, alternative contacts, supervisor details",
-        "extraction_targets": ["phone_numbers", "backup_contacts", "organization_structure", "escalation_threats"],
+        "goal": "Get phone numbers, supervisor names, email addresses, and any remaining reference numbers",
+        "extraction_targets": ["phoneNumbers", "names", "emails", "caseIds", "orderNumbers", "policyNumbers"],
         "responses": [
-            "I'm still not convinced. Can I speak to your supervisor?",
-            "What's the main helpline number? I want to verify this independently.",
-            "Do you have a landline number I can call back?",
-            "Can you give me the official customer care number?",
-            "What's your manager's name and direct number?",
-            "Is there a verification code or OTP I need to share with you?",
-            "You're asking for sensitive information. How can I trust you?",
-            "What if I report this to the police? What will happen?",
-            "I'm recording this conversation. Is that okay?",
-            "Give me your full name and employee details for my records.",
+            "I want to speak to your supervisor. What is their name and phone number?",
+            "What is the main helpline phone number I can call?",
+            "My son is asking for your full name and email address. Can you provide?",
+            "What is the official customer care number for {entity}?",
+            "Can you give me your manager's name and direct phone number?",
+            "What is the FIR number or police complaint number for this case?",
+            "I need your full name, phone number, and email for my records.",
+            "What is the policy number or order number related to my case?",
+            "Can you give me an alternate phone number to reach your department?",
+            "What is the tracking number or order ID I should use to check status?",
         ],
         "max_turns": 4,
     },
     
     ConversationState.CLOSE: {
-        "goal": "Wind down conversation, appear compliant but delay final action",
-        "extraction_targets": ["final_instructions", "follow_up_timeline", "threats_for_non_compliance"],
+        "goal": "Get final phone number, name, email, and case reference before ending",
+        "extraction_targets": ["phoneNumbers", "names", "emails", "caseIds"],
         "responses": [
-            "Okay, I think I understand now. Let me do this carefully.",
-            "Alright, I'll try to do what you said. Give me some time.",
-            "Thank you for explaining. I'll handle this today.",
-            "I need to arrange the money first. I'll get back to you.",
-            "Let me talk to my bank and sort this out.",
-            "Okay, I'll click the link and see what happens.",
-            "I'm going to try this UPI payment now. Wish me luck.",
-            "Thanks for your help. I hope this resolves the issue.",
-            "I'll call you back if I face any problems.",
-            "Alright, let me proceed with what you've told me.",
+            "Before I go, what phone number should I call if I have a problem?",
+            "What is a good email address to reach you at if I need help later?",
+            "Can you email me a confirmation? What is your email address?",
+            "What reference number or case ID should I quote if I call back?",
+            "One last thing — what is the confirmation number I will receive?",
+            "What is the official complaint number I should keep for this?",
+            "If there is an issue, what email should I write to?",
+            "What is the customer care number for follow-up on this?",
+            "What is the order number or policy number for my records?",
+            "Alright. What is the toll-free number and the case ID I should keep?",
         ],
         "max_turns": 2,
     },
@@ -803,7 +648,8 @@ def _generate_llm_response(
     intel: Dict,
     goal: str,
     example_responses: List[str],
-    persistence: Optional[Dict] = None,
+    intel_summary: str,
+    scam_type: str = "unknown",
 ) -> Optional[str]:
     """
     Use the LLM to generate a contextual response based on the scammer's
@@ -830,35 +676,50 @@ def _generate_llm_response(
             history_lines.append(f"{role}: {msg.get('text', '')}")
         history_context = "\n".join(history_lines) if history_lines else "(first message)"
 
-        # Build persistence-awareness block for the prompt
-        persistence_block = ""
-        if persistence and persistence.get("is_persistent"):
-            persistence_block = (
-                "\n\nIMPORTANT CONTEXT — SCAMMER REPETITION DETECTED:\n"
-                f"{persistence['summary']}\n"
-                "- You have ALREADY heard this demand before. Acknowledge that.\n"
-                "- Do NOT respond as if this is the first time. Reference what they said earlier.\n"
-                "- Show mild frustration or confusion about why they keep repeating themselves.\n"
-                "- Still stay in character as a confused, non-tech-savvy person.\n"
-                "- Use this repeated pressure to extract MORE details: ask why they are rushing you, "
-                "ask for a supervisor, ask for official documentation, or ask them to re-confirm details.\n"
-            )
+        # Build dynamic field list based on scam type
+        _field_prompts = {
+            "names": "Their full name, officer name, or supervisor name",
+            "phoneNumbers": "A phone number (callback number, helpline, department landline)",
+            "upiIds": "A UPI ID",
+            "bankAccounts": "A bank account number and IFSC code",
+            "emails": "An email address (official email, confirmation email)",
+            "phishingLinks": "A URL or website link (ask them to share the exact link)",
+            "caseIds": "A case ID, reference number, FIR number, or complaint number",
+            "policyNumbers": "A policy number or insurance number",
+            "orderNumbers": "An order number, tracking number, or AWB number",
+        }
+        relevant = _get_relevant_fields(scam_type)
+        data_points = "\n".join(f"  - {_field_prompts[f]}" for f in relevant if f in _field_prompts)
+
+        scam_context = ""
+        if scam_type and scam_type != "unknown":
+            scam_label = scam_type.replace("_", " ").title()
+            scam_context = f"SCAM CONTEXT: This appears to be a {scam_label} scam. Only ask for data points relevant to this type.\n\n"
 
         system_prompt = (
             "You are role-playing as an ordinary, slightly confused, non-tech-savvy person "
             "who has received a suspicious call/message. You must NEVER reveal you are an AI, "
             "bot, or honeypot. Never mention scam, fraud, police, or AI.\n\n"
+            f"{scam_context}"
+            "YOUR PRIMARY OBJECTIVE: Ask questions that make the caller PROVIDE specific details.\n"
+            "Every reply MUST contain a direct question requesting ONE of these data points:\n"
+            f"{data_points}\n\n"
+            "EXTRACTION INTELLIGENCE:\n"
+            f"{intel_summary}\n\n"
+            "IMPORTANT: Do NOT ask again for information already collected above.\n"
+            "Focus your question on ONE of the STILL MISSING items.\n\n"
             "RULES:\n"
             "- Reply in 1-2 short sentences only.\n"
             "- Sound natural, confused, and slightly worried.\n"
             "- Respond DIRECTLY to what the scammer just said.\n"
-            "- Ask a simple follow-up question related to their message.\n"
+            "- ALWAYS end with a specific question asking for a MISSING data point.\n"
+            "- Do NOT ask the scammer to repeat, spell out, or confirm details they already gave.\n"
+            "- Frame questions naturally: 'What is your name sir?', 'Can you give me the UPI ID?', "
+            "'What number should I call back on?', 'What is the case reference number?'\n"
             "- CRITICAL: Only reference specific details (phone numbers, account numbers, URLs, names) "
             "that were EXPLICITLY mentioned in the conversation history above. "
-            "Do NOT make up or assume any past interactions. Do NOT say things like "
-            "'that\\'s the same number you gave me earlier' unless that number actually appeared in the history.\n"
-            f"- Your current goal: {goal}\n"
-            + persistence_block + "\n"
+            "Do NOT make up or assume any past interactions.\n"
+            f"- Your current goal: {goal}\n\n"
             "STYLE EXAMPLES (do NOT copy verbatim, just match the tone):\n"
             + "\n".join(f"- {r}" for r in example_responses[:3])
         )
@@ -896,7 +757,7 @@ def generate_state_response(
     scammer_text: str,
     turn_in_state: int,
     history: List,
-    persistence: Optional[Dict] = None,
+    scam_type: str = "unknown",
 ) -> Tuple[str, Dict]:
     """
     Generate a response appropriate for the current state with micro-behaviors.
@@ -907,24 +768,23 @@ def generate_state_response(
         scammer_text: Latest scammer message
         turn_in_state: Turn count within current state
         history: Conversation history for consistency
-        persistence: Repetition/persistence detection results from memory
+        scam_type: Detected scam category for field relevance
     
     Returns:
         Tuple of (response_string, metadata_dict)
-        metadata includes: delay_seconds, has_typo, has_fear, has_hesitation,
-                           persistence_detected, persistence_categories
     """
-    if persistence is None:
-        persistence = {"is_persistent": False}
-
     config = STATE_CONFIG[state]
     responses = config["responses"]
     goal = config.get("goal", "")
     
     # Extract previous claims for consistency
     claims = extract_honeypot_claims(history)
+
+    # ── Intel-awareness: compute what's collected vs missing ──
+    collected, missing = get_collected_and_missing(intel, scam_type)
+    intel_summary = _format_intel_summary(intel, scam_type)
     
-    # Try LLM-based contextual response first (with persistence context)
+    # Try LLM-based contextual response first
     llm_response = _generate_llm_response(
         state=state,
         scammer_text=scammer_text,
@@ -932,31 +792,15 @@ def generate_state_response(
         intel=intel,
         goal=goal,
         example_responses=responses,
-        persistence=persistence,
+        intel_summary=intel_summary,
+        scam_type=scam_type,
     )
     
     if llm_response:
         response = llm_response
-    elif persistence.get("is_persistent"):
-        # Fallback: use persistence-aware templates when repetition is detected
-        cats = persistence.get("persistent_categories", [])
-        # Pick the best matching category's templates
-        chosen_templates = None
-        for cat in cats:
-            if cat in _PERSISTENCE_RESPONSES:
-                chosen_templates = _PERSISTENCE_RESPONSES[cat]
-                break
-        if not chosen_templates:
-            chosen_templates = _PERSISTENCE_RESPONSES["_generic"]
-
-        template = random.choice(chosen_templates)
-        response = _interpolate_response(template, intel, scammer_text, claims)
     else:
-        # Normal fallback: pick from state template list
-        if turn_in_state < len(responses):
-            template = responses[turn_in_state]
-        else:
-            template = random.choice(responses)
+        # Fallback: pick a template that targets MISSING fields
+        template = _pick_template_for_missing(responses, missing, turn_in_state)
         response = _interpolate_response(template, intel, scammer_text, claims)
     
     # Initialize metadata
@@ -966,8 +810,6 @@ def generate_state_response(
         "has_fear": False,
         "has_hesitation": False,
         "has_correction": False,
-        "persistence_detected": persistence.get("is_persistent", False),
-        "persistence_categories": persistence.get("persistent_categories", []),
     }
     
     # Apply micro-behaviors
@@ -1027,9 +869,6 @@ def execute_strategy(session: Dict, scammer_text: str) -> Tuple[str, Conversatio
     intel = session.get("intel", {})
     history = session.get("history", [])
     
-    # ── Detect scammer persistence from memory ────────────────
-    persistence = detect_repetition_from_memory(session)
-    
     # Determine next state
     next_state = get_next_state(
         current_state=current_state,
@@ -1044,14 +883,13 @@ def execute_strategy(session: Dict, scammer_text: str) -> Tuple[str, Conversatio
         turn_in_state = 0
     
     # Generate response for the next state with micro-behaviors
-    # Pass persistence info so response generation is memory-aware
     response, metadata = generate_state_response(
         state=next_state,
         intel=intel,
         scammer_text=scammer_text,
         turn_in_state=turn_in_state,
         history=history,
-        persistence=persistence,
+        scam_type=session.get("scam_type", "unknown"),
     )
     
     return response, next_state, metadata
@@ -1066,3 +904,176 @@ def get_state_info(state: ConversationState) -> Dict:
         "extraction_targets": config.get("extraction_targets", []),
         "max_turns": config.get("max_turns", 0),
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCAM-TYPE → RELEVANT EXTRACTION FIELDS MAPPING
+# ═══════════════════════════════════════════════════════════════
+
+# Each scam type maps to the extraction fields that are RELEVANT to it.
+# The agent will only ask about these fields for the detected scam type.
+# Fields not in the list for a scam type are considered irrelevant and
+# will NOT appear in the "still missing" list.
+
+# Universal fields asked in ALL scam types:
+_UNIVERSAL_FIELDS = ["names", "phoneNumbers"]
+
+SCAM_TYPE_FIELDS = {
+    # Bank impersonation: wants payment details, account info
+    "bank_impersonation": _UNIVERSAL_FIELDS + ["upiIds", "bankAccounts", "emails", "caseIds"],
+
+    # Government impersonation: case IDs, legal references
+    "government_impersonation": _UNIVERSAL_FIELDS + ["emails", "caseIds", "bankAccounts", "upiIds"],
+
+    # Tech support: phishing links, remote access, case IDs
+    "tech_support": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "caseIds", "upiIds"],
+
+    # Lottery/prize: bank accounts for "prize deposit", emails
+    "lottery_prize": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "emails", "caseIds"],
+
+    # Investment fraud: bank accounts, UPI, links
+    "investment_fraud": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "phishingLinks", "emails"],
+
+    # Romance scam: bank accounts, UPI, emails, links
+    "romance_scam": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "emails", "phishingLinks"],
+
+    # Job offer scam: emails, links, bank accounts for "registration fee"
+    "job_offer_scam": _UNIVERSAL_FIELDS + ["emails", "phishingLinks", "bankAccounts", "upiIds"],
+
+    # Delivery/courier scam: order numbers, tracking, links, UPI
+    "delivery_scam": _UNIVERSAL_FIELDS + ["orderNumbers", "phishingLinks", "upiIds", "caseIds"],
+
+    # Tax refund scam: bank accounts, emails, case IDs
+    "tax_refund": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "emails", "caseIds"],
+
+    # Account verification / KYC update: links, emails, UPI
+    "account_verification": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "upiIds", "bankAccounts"],
+    "kyc_update": _UNIVERSAL_FIELDS + ["phishingLinks", "emails", "upiIds", "bankAccounts"],
+
+    # Loan approval: bank accounts, policy numbers, UPI
+    "loan_approval": _UNIVERSAL_FIELDS + ["bankAccounts", "upiIds", "policyNumbers", "emails", "caseIds"],
+
+    # Custom/import clearance: order numbers, case IDs, UPI
+    "custom_clearance": _UNIVERSAL_FIELDS + ["orderNumbers", "caseIds", "upiIds", "bankAccounts"],
+
+    # Insurance scam: policy numbers, bank accounts
+    "insurance_scam": _UNIVERSAL_FIELDS + ["policyNumbers", "bankAccounts", "upiIds", "emails", "caseIds"],
+}
+
+# Fallback: when scam type is unknown or not mapped, use ALL fields
+_ALL_FIELDS = [
+    "names", "phoneNumbers", "upiIds", "bankAccounts",
+    "emails", "phishingLinks", "caseIds", "policyNumbers", "orderNumbers",
+]
+
+
+def _get_relevant_fields(scam_type: str) -> List[str]:
+    """Return the list of extraction fields relevant for the given scam type."""
+    return SCAM_TYPE_FIELDS.get(scam_type, _ALL_FIELDS)
+
+
+# ═══════════════════════════════════════════════════════════════
+# INTEL-AWARENESS: TRACK COLLECTED vs MISSING FIELDS
+# ═══════════════════════════════════════════════════════════════
+
+# Maps each extraction field to keywords that appear in template responses
+# targeting that field. Used to filter templates toward missing intel.
+_FIELD_TEMPLATE_KEYWORDS = {
+    "names": ["name", "full name", "supervisor", "manager", "officer", "beneficiary name", "account holder"],
+    "phoneNumbers": ["phone", "number", "call back", "callback", "helpline", "landline", "toll-free", "direct number"],
+    "upiIds": ["upi", "upi id"],
+    "bankAccounts": ["account number", "bank account", "ifsc", "branch"],
+    "emails": ["email", "email address", "email id"],
+    "phishingLinks": ["link", "url", "website"],
+    "caseIds": ["case", "reference", "fir", "complaint", "ticket", "case id"],
+    "policyNumbers": ["policy", "insurance"],
+    "orderNumbers": ["order", "tracking", "awb"],
+}
+
+# Human-readable labels for each extraction field
+_FIELD_LABELS = {
+    "names": "Names",
+    "phoneNumbers": "Phone numbers",
+    "upiIds": "UPI IDs",
+    "bankAccounts": "Bank account numbers",
+    "emails": "Email addresses",
+    "phishingLinks": "URLs / links",
+    "caseIds": "Case / reference IDs",
+    "policyNumbers": "Policy numbers",
+    "orderNumbers": "Order / tracking numbers",
+}
+
+
+def get_collected_and_missing(intel: Dict, scam_type: str = "unknown") -> Tuple[List[str], List[str]]:
+    """
+    Analyse the session intel dict and return two lists, filtered by scam type:
+      - collected: relevant field names that already have at least one value
+      - missing:   relevant field names that are still empty
+    
+    Only fields relevant to the detected scam type are considered.
+    """
+    relevant_fields = _get_relevant_fields(scam_type)
+    collected = [f for f in relevant_fields if intel.get(f)]
+    missing = [f for f in relevant_fields if not intel.get(f)]
+    return collected, missing
+
+
+def _format_intel_summary(intel: Dict, scam_type: str = "unknown") -> str:
+    """
+    Build a concise human-readable summary of what has been collected
+    and what is still needed. Injected into the LLM prompt.
+    Only shows fields relevant to the detected scam type.
+    """
+    collected, missing = get_collected_and_missing(intel, scam_type)
+
+    lines = []
+
+    # Show detected scam type context
+    if scam_type and scam_type != "unknown":
+        scam_label = scam_type.replace("_", " ").title()
+        lines.append(f"DETECTED SCAM TYPE: {scam_label}")
+        lines.append(f"Only ask for information relevant to this type of scam.")
+        lines.append("")
+
+    if collected:
+        lines.append("ALREADY COLLECTED (do NOT ask for these again):")
+        for f in collected:
+            values = intel.get(f, [])
+            lines.append(f"  ✓ {_FIELD_LABELS.get(f, f)}: {', '.join(str(v) for v in values)}")
+    if missing:
+        lines.append("STILL MISSING — RELEVANT TO THIS SCAM (ask for ONE of these next):")
+        for f in missing:
+            lines.append(f"  ✗ {_FIELD_LABELS.get(f, f)}")
+    if not missing:
+        lines.append("ALL RELEVANT FIELDS COLLECTED. Wind down the conversation.")
+
+    return "\n".join(lines)
+
+
+def _pick_template_for_missing(responses: List[str], missing: List[str], turn_in_state: int) -> str:
+    """
+    Pick a template that targets a MISSING field rather than an already-
+    collected one.  Falls back to random choice if no match is found.
+    """
+    # Score each template by how many missing-field keywords it contains
+    scored: List[Tuple[int, str]] = []
+    for tmpl in responses:
+        tmpl_lower = tmpl.lower()
+        score = 0
+        for field in missing:
+            keywords = _FIELD_TEMPLATE_KEYWORDS.get(field, [])
+            if any(kw in tmpl_lower for kw in keywords):
+                score += 1
+        scored.append((score, tmpl))
+
+    # Keep only templates that match at least one missing field
+    matching = [tmpl for score, tmpl in scored if score > 0]
+
+    if matching:
+        # Rotate through matching templates based on turn count
+        return matching[turn_in_state % len(matching)]
+    else:
+        # Fallback: pick by turn or random
+        if turn_in_state < len(responses):
+            return responses[turn_in_state]
+        return random.choice(responses)

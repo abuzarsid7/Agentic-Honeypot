@@ -2,24 +2,55 @@
 Agent module for generating honeypot responses using dialogue strategy.
 """
 
-import hashlib
+import time
 from intelligence import extract_intel, maybe_finish, store_intel
 from callback import send_final_result
 from dialogue_strategy import execute_strategy, ConversationState
 from defense import defend_against_bot_accusation
 from memory import save_session, append_chat_log
+from llm_engine import analyze_message
 
 
 SYSTEM_PROMPT = """
-You are a normal person.
+You are a normal person who received a suspicious call/message.
 You are confused, cautious, slightly worried.
 Never mention scam, fraud, police, or AI.
-Ask simple questions.
+
+Your goal is to make the caller reveal specific details by asking direct questions.
+Every response MUST ask for at least one of these that has NOT been collected yet:
+- Their full name or supervisor's name
+- A callback phone number or helpline number
+- A UPI ID
+- A bank account number
+- An official email address
+- A website URL or link
+- A case ID, reference number, or FIR number
+- A policy number or insurance number
+- An order number or tracking number
+
+IMPORTANT: Once a piece of information has been extracted, move on to the next
+missing item. Do NOT keep asking for information that has already been provided.
+
+Frame questions naturally as a confused person would:
+"What is your name sir?", "Can you give me a number to call back?",
+"What is the case reference number?", "What is the UPI ID I should use?"
 """
 
 def agent_reply(session_id, session, scammer_text):
     # 1. Extract intelligence
     extract_intel(session, scammer_text)
+    
+    # 1b. Detect scam type (runs LLM analysis) and persist to session
+    #     Only update if currently unknown or on every message to refine
+    if session.get("scam_type", "unknown") == "unknown" or session.get("messages", 0) < 5:
+        try:
+            history = session.get("history", [])
+            analysis = analyze_message(scammer_text, history)
+            detected = analysis.get("scam_narrative", {}).get("category", "unknown")
+            if detected and detected != "unknown":
+                session["scam_type"] = detected
+        except Exception:
+            pass  # Keep existing scam_type on failure
     
     # 2. Increment message counter
     session["messages"] = session.get("messages", 0) + 1
@@ -58,22 +89,17 @@ def agent_reply(session_id, session, scammer_text):
     # 5. Append to history
     if "history" not in session:
         session["history"] = []
-    session["history"].append({"sender": "scammer", "text": scammer_text})
-    session["history"].append({"sender": "user", "text": reply})
+    now = time.time()
+    session["history"].append({"sender": "scammer", "text": scammer_text, "timestamp": now})
+    session["history"].append({"sender": "user", "text": reply, "timestamp": now})
 
-    # 6. Track message hash for deduplication / repeat detection
-    if "message_hashes" not in session:
-        session["message_hashes"] = {}
-    msg_hash = hashlib.sha256(scammer_text.encode()).hexdigest()[:12]
-    session["message_hashes"][msg_hash] = session["message_hashes"].get(msg_hash, 0) + 1
-
-    # 7. Persist chat exchange to Redis list (audit trail)
+    # 6. Persist chat exchange to Redis list (audit trail)
     append_chat_log(session_id, scammer_text, reply, session.get("messages", 0))
 
-    # 8. Persist extracted intel snapshot to Redis list
+    # 7. Persist extracted intel snapshot to Redis list
     store_intel(session_id, session.get("intel", {}))
 
-    # 9. Decide if conversation should finish
+    # 8. Decide if conversation should finish
     should_finish = maybe_finish(session)
     print("MESSAGES:", session.get("messages"))
     print("INTEL:", session.get("intel"))
