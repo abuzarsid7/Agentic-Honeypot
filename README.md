@@ -1,4 +1,4 @@
-# 🛡️ Agentic Honeypot
+# 🛡️ Agentic Honeypot API
 ### An Intelligent Scam Engagement & Intelligence Extraction System
 
 Agentic Honeypot is an AI-powered defensive system designed to **engage scammers in conversation**, extract actionable intelligence, and prevent real victims from being targeted.
@@ -128,9 +128,13 @@ git clone https://github.com/yourusername/agentic-honeypot.git
 cd agentic-honeypot
 ```
 ## 2️⃣ Create virtual environment
-python -m venv venv
-source venv/bin/activate   # Mac/Linux
-venv\Scripts\activate      # Windows
+
+python -m venv venv  
+
+source venv/bin/activate   # Mac/Linux  
+
+venv\Scripts\activate      # Windows  
+
 ---
 ## 3️⃣ Install dependencies
 pip install -r requirements.txt
@@ -138,8 +142,11 @@ pip install -r requirements.txt
 ### Configure by putting keys in .env
 
 ## ▶️ Running the Server
-python main.py
-Server runs at:
+  
+  
+  python main.py
+  
+  Server runs at:
 ```
 http://127.0.0.1:8000
 ```
@@ -149,6 +156,11 @@ Cyber Crime Cell Delhi case #CC-2026-7782
 Your bank account will be frozen.
 Click here: bit.ly/3xYzReward
 ```
+## The Agent API is deployed on:
+
+https://agentic-honeypot-production-7ae4.up.railway.app/honeypot
+
+
 ### Agent Behavior:
 	•	Detects authority impersonation
 	•	Extracts case ID
@@ -162,6 +174,7 @@ If scammer says:
 “Are you a bot?”
 
 The system uses:
+
 	•	Light humor
 	•	Mild confusion
 	•	Topic redirection
@@ -171,6 +184,7 @@ To prevent early abandonment.
 ### 📊 Telemetry & Logging
 
 The system logs:
+
 	•	Risk scores
 	•	Extracted intelligence
 	•	Conversation states
@@ -178,6 +192,7 @@ The system logs:
 	•	Session tracking
 
 Useful for:
+
 	•	Threat analysis
 	•	Scam pattern clustering
 	•	Research datasets
