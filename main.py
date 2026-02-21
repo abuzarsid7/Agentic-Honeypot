@@ -18,6 +18,23 @@ load_dotenv()
 
 API_KEY = os.getenv("API_KEY")
 
+# ── Intel dict normalizer ─────────────────────────────────────────────────────
+# Ensures every expected field is present regardless of when the session was
+# created (old Redis sessions pre-date some fields like ifscCodes).
+_INTEL_FIELDS = [
+    "phoneNumbers", "upiIds", "phishingLinks", "bankAccounts",
+    "ifscCodes", "names", "emails", "caseIds",
+    "policyNumbers", "orderNumbers", "additionalIntel",
+]
+
+def _normalize_intel(intel: dict) -> dict:
+    """Return a copy of intel with all expected fields guaranteed present."""
+    out = dict(intel)  # shallow copy — preserve existing data
+    for field in _INTEL_FIELDS:
+        if field not in out:
+            out[field] = {} if field == "additionalIntel" else []
+    return out
+
 app = FastAPI()
 
 # CORS middleware for frontend
@@ -145,7 +162,7 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
 
             # ── Guard: refuse to reply once conversation has formally ended ──
             if session.get("conversation_ended"):
-                intel = session.get("intel", {})
+                intel = _normalize_intel(session.get("intel", {}))
                 return {
                     "status": "ended",
                     "sessionId": session_id,
@@ -209,16 +226,24 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             save_session(session_id, session)
 
             # ── Build full rubric-compliant response ──────────────────────────────
-            intel = session.get("intel", {})
+            intel = _normalize_intel(session.get("intel", {}))
             total_messages = session.get("messages", 0)
             duration_secs = round(time.time() - session.get("start_time", time.time()), 1)
-            collected_fields = [k for k, v in intel.items() if v]
+            # Build agent notes from normalized intel so all field types are counted
+            collected_parts = []
+            if intel.get("phishingLinks"):     collected_parts.append(f"Shared {len(intel['phishingLinks'])} phishing link(s)")
+            if intel.get("upiIds"):            collected_parts.append(f"Requested payment to {len(intel['upiIds'])} UPI ID(s)")
+            if intel.get("phoneNumbers"):      collected_parts.append(f"Provided {len(intel['phoneNumbers'])} phone number(s) for callback")
+            if intel.get("bankAccounts"):      collected_parts.append(f"Mentioned {len(intel['bankAccounts'])} account number(s)")
+            if intel.get("ifscCodes"):         collected_parts.append(f"Provided {len(intel['ifscCodes'])} IFSC code(s)")
+            if intel.get("names"):             collected_parts.append(f"Identified name(s): {', '.join(intel['names'][:3])}")
+            if intel.get("emails"):            collected_parts.append(f"Shared {len(intel['emails'])} email address(es)")
+            if intel.get("caseIds"):           collected_parts.append(f"Referenced {len(intel['caseIds'])} case/reference ID(s)")
+            if intel.get("policyNumbers"):     collected_parts.append(f"Mentioned {len(intel['policyNumbers'])} policy number(s)")
+            if intel.get("orderNumbers"):      collected_parts.append(f"Mentioned {len(intel['orderNumbers'])} order number(s)")
+            if not collected_parts:            collected_parts.append("No structured intel extracted yet")
             flags_summary = ", ".join(all_flags[:3]) if all_flags else "none detected"
-            agent_notes = (
-                f"Engaged {scam_type} scam. "
-                f"Collected: {', '.join(collected_fields) or 'none yet'}. "
-                f"Key signals: {flags_summary}."
-            )
+            agent_notes = ". ".join(collected_parts) + f". Key signals: {flags_summary}."
 
             return {
                 "status": "success",

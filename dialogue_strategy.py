@@ -458,32 +458,15 @@ def get_next_state(
     
     total_messages = session.get("messages", 0)
 
-    # ── Absolute hard cap (prevent truly infinite sessions) ─────
-    # 30 messages is the safety ceiling; should_close_conversation
-    # in intelligence.py also enforces this independently.
-    if total_messages >= 30:
+    # ── Absolute safety ceiling (prevent truly infinite sessions) ──
+    # Only the hard cap ever ends a conversation — all intel-score and
+    # stagnation checks have been removed so the agent stays engaged
+    # and keeps asking new questions as long as possible.
+    if total_messages >= 50:
         session["conversation_ended"] = True
         return ConversationState.CLOSE
 
-    # ── Stagnation close: no new intel for 3+ consecutive turns ─
-    # Only close after substantial engagement (15+ msgs) AND the scammer
-    # has both disengaged AND we already have meaningful intel (>=60%).
-    if total_messages >= 15:
-        if patterns["stale_intel"] and patterns["disengagement"] and components["artifacts"] >= 0.60:
-            session["conversation_ended"] = True
-            return ConversationState.CLOSE
-
-    # ── Early-close: all relevant fields already collected ───────
-    # Only exit early after 20+ turns to ensure maximum engagement.
-    if total_messages >= 20:
-        scam_type_key = session.get("scam_type", "unknown")
-        relevant = _get_relevant_fields(scam_type_key)
-        all_collected = all(intel.get(f) for f in relevant)
-        if all_collected and relevant:
-            session["conversation_ended"] = True
-            return ConversationState.CLOSE
-
-    # ── State transition rules ─────────────────────────────────
+    # ── State transition rules ─────────────────────────────────────
     
     if current_state == ConversationState.INIT:
         # After establishing contact, probe for reason
@@ -539,39 +522,18 @@ def get_next_state(
         return ConversationState.CONFIRM_DETAILS
     
     elif current_state == ConversationState.ESCALATE_EXTRACTION:
-        # ── Intelligent closing logic using intel_score ──
-
-        # Minimum engagement: keep talking for at least 15 messages
-        if total_messages < 15:
+        # Never close from here — always cycle back through extraction states
+        # so we keep probing for new intel on every turn.
+        if not exceeded_turns:
             return ConversationState.ESCALATE_EXTRACTION
-
-        # Pattern 1: Scammer disengaged + substantial intel already collected
-        # Disengagement alone is not enough — scammers often give short replies
-        if patterns["disengagement"] and components["artifacts"] >= 0.65:
-            return ConversationState.CLOSE
-
-        # Pattern 3: Stale intel + strong extraction (don't quit if we still have gaps)
-        if patterns["stale_intel"] and components["artifacts"] >= 0.65:
-            return ConversationState.CLOSE
-
-        # Pattern 4: Very high quality extraction complete
-        if intel_score >= 0.85:
-            return ConversationState.CLOSE
-
-        # Pattern 5: Good extraction + truly diminishing novelty for a while
-        if components["artifacts"] >= 0.75 and components["novelty"] < 0.15:
-            return ConversationState.CLOSE
-
-        # Pattern 6: Multiple strong warning signs
-        if patterns["severity"] >= 0.85:
-            return ConversationState.CLOSE
-
-        # Pattern 8: Has key intel + exceeded turns + deep enough in conversation
-        if has_phone and (has_upi or has_urls) and exceeded_turns and total_messages >= 18:
-            return ConversationState.CLOSE
-
-        # Continue extracting
-        return ConversationState.ESCALATE_EXTRACTION
+        # Rotate: ESCALATE → STALL → CONFIRM → back to relevant probe
+        # This gives fresh question templates and avoids repeating identical asks.
+        if has_payment or has_upi or intel.get("bankAccounts"):
+            return ConversationState.PROBE_PAYMENT
+        elif has_link or has_urls:
+            return ConversationState.PROBE_LINK
+        else:
+            return ConversationState.STALL
     
     elif current_state == ConversationState.CLOSE:
         # Stay in close state

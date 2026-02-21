@@ -24,18 +24,20 @@ def send_final_result(session_id, session):
         start_time = session.get("start_time", time.time())
         engagement_duration = int(time.time() - start_time)
 
-    # Build extractedIntelligence with only the required fields
+    # Build extractedIntelligence with all required fields
     intel = session.get("intel", {})
     extracted_intelligence = {
         "phoneNumbers": intel.get("phoneNumbers", []),
         "bankAccounts": intel.get("bankAccounts", []),
         "upiIds": intel.get("upiIds", []),
         "phishingLinks": intel.get("phishingLinks", []),
+        "ifscCodes": intel.get("ifscCodes", []),
         "emailAddresses": intel.get("emails", []),
         "names": intel.get("names", []),
         "caseIds": intel.get("caseIds", []),
         "policyNumbers": intel.get("policyNumbers", []),
         "orderNumbers": intel.get("orderNumbers", []),
+        "additionalIntel": intel.get("additionalIntel", {}),
     }
 
     payload = {

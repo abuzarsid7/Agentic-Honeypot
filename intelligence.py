@@ -991,86 +991,35 @@ def detect_scammer_patterns(session: dict) -> dict:
 
 def should_close_conversation(session: dict) -> tuple[bool, str]:
     """
-    Intelligent decision on whether to close conversation.
-    
-    Prevents:
-    - Infinite loops (stale intel detection)
-    - Premature close (minimum quality threshold)
-    - Under-extraction (novelty rate check)
-    
-    Returns:
-        (should_close, reason)
+    Only close when the hard safety ceiling is reached (50 messages).
+    All score/pattern/stagnation-based closes have been removed so the
+    honeypot keeps scammers engaged as long as possible.
     """
-    messages = len(session.get("history", []))
-    intel_score_data = calculate_intel_score(session)
-    intel_score = intel_score_data["score"]
-    components = intel_score_data["components"]
-    patterns = detect_scammer_patterns(session)
-    
-    # ── Safety: Hard limits ────────────────────────────────────
-    # Absolute max: 30 messages regardless (prevent infinite loop)
-    if messages >= 30:
+    # Count both sides of the conversation: each turn = 2 history entries
+    messages = session.get("messages", len(session.get("history", [])) // 2)
+
+    # Hard safety ceiling — mirrors dialogue_strategy.py
+    if messages >= 50:
         return True, "hard_limit_reached"
-    
-    # Absolute min: At least 6 messages (prevent premature close)
-    if messages < 6:
-        return False, "too_early"
-    
-    # ── Condition 1: No new intel in last 3 turns ──────────────
-    if patterns["stale_intel"] and messages >= 10:
-        # If extraction stagnated AND we have decent intel, close
-        if components["artifacts"] >= 0.4:  # At least 40% intel collected
-            return True, "intel_stagnation"
-    
-    # ── Condition 2: Repeated pressure tactics ─────────────────
-    # Scammer pressure = opportunity to extract more intel.
-    # The persistence detection in dialogue_strategy handles this
-    # with strategic responses, so we keep the conversation open.
-    
-    # ── Condition 3: Scammer disengagement ─────────────────────
-    if patterns["disengagement"]:
-        # Scammer giving up, finalize now
-        return True, "scammer_disengaged"
-    
-    # ── Condition 4: High quality extraction complete ──────────
-    # Intel score > 0.75 AND decent conversation length
-    if intel_score >= 0.75 and messages >= 12:
-        return True, "high_quality_complete"
-    
-    # ── Condition 5: Good extraction + low novelty ─────────────
-    # We have good intel but not getting more
-    if components["artifacts"] >= 0.6 and components["novelty"] < 0.3 and messages >= 10:
-        return True, "diminishing_returns"
-    
-    # ── Condition 6: Pattern severity threshold ────────────────
-    # Multiple negative patterns detected
-    if patterns["severity"] >= 0.7 and messages >= 8:
-        return True, "multiple_warning_signs"
-    
-    # ── Continue: Still extracting value ───────────────────────
-    # High novelty OR low intel collected OR scammer still engaged
-    if components["novelty"] >= 0.5 or components["artifacts"] < 0.5:
-        return False, "continue_extraction"
-    
-    # Default: continue if no clear closing signal
+
+    # Keep talking
     return False, "normal_flow"
 
 
 def maybe_finish(session):
     """
-    Determine if conversation should end using intelligent scoring.
-    
-    Replaced simple message counting with:
-    - Weighted intel scoring
-    - Novelty rate tracking
-    - Scammer pattern detection
-    - Strategic closing conditions
+    Determine if conversation should end.
+    Only fires at the hard ceiling (50 messages).
+    Sets conversation_ended so the callback is sent exactly once.
     """
+    # Never fire twice for the same session
+    if session.get("conversation_ended"):
+        return False
+
     should_close, reason = should_close_conversation(session)
-    
-    # Store closing metadata for telemetry
-    if should_close and "close_reason" not in session:
+
+    if should_close:
         session["close_reason"] = reason
-        session["final_intel_score"] = calculate_intel_score(session)
-    
+        session["conversation_ended"] = True  # prevents duplicate callbacks
+
     return should_close
