@@ -7,7 +7,7 @@ function App() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState("");
   const [ended, setEnded] = useState(false);
-  const sessionId = useRef("abz's-session-015");
+  const [sessionId, setSessionId] = useState(null);
   const chatRef = useRef(null);
 
   const sendMessage = async () => {
@@ -29,7 +29,9 @@ function App() {
           "X-API-KEY": API_KEY,
         },
         body: JSON.stringify({
-          sessionId: sessionId.current,
+          // Send existing sessionId on follow-up turns; omit on first turn
+          // so the backend auto-generates one and returns it.
+          ...(sessionId ? { sessionId } : {}),
           message: scammerMessage,
           conversationHistory: [],
         }),
@@ -37,13 +39,18 @@ function App() {
 
       const data = await res.json();
 
+      // Capture the sessionId returned by the backend on every response
+      if (data.sessionId) {
+        setSessionId(data.sessionId);
+      }
+
       if (data.reply) {
         setMessages((prev) => [
           ...prev,
           { sender: "honeypot", text: data.reply },
         ]);
       }
-      if (data.conversation_ended) {
+      if (data.conversationEnded || data.status === "ended") {
         setEnded(true);
       }
     } catch (err) {
@@ -58,6 +65,13 @@ function App() {
   return (
     <div style={styles.container}>
       <h2>Agentic Honeypot Demo</h2>
+
+      {sessionId && (
+        <div style={styles.sessionBadge}>
+          <span style={styles.sessionLabel}>Session ID:</span>
+          <code style={styles.sessionValue}>{sessionId}</code>
+        </div>
+      )}
 
       <div style={styles.chat} ref={chatRef}>
         {messages.map((msg, idx) => (
@@ -125,6 +139,26 @@ const styles = {
   },
   button: {
     padding: "8px 16px",
+  },
+  sessionBadge: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    background: "#1a1a2e",
+    border: "1px solid #444",
+    borderRadius: "5px",
+    padding: "6px 12px",
+    marginBottom: "10px",
+    fontSize: "12px",
+  },
+  sessionLabel: {
+    color: "#aaa",
+    fontWeight: "bold",
+    whiteSpace: "nowrap",
+  },
+  sessionValue: {
+    color: "#08b1ff",
+    wordBreak: "break-all",
   },
 };
 

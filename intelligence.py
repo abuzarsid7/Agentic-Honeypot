@@ -166,16 +166,21 @@ def extract_number_words(text: str) -> List[str]:
 # LLM-BASED EXTRACTION
 # ═══════════════════════════════════════════════════════════════
 
-def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
+def extract_intel_with_llm(text: str, history: List) -> Dict:
     """
-    Use LLM to extract intelligence that regex might miss.
-    Returns structured extraction results.
+    LLM-primary intelligence extraction.
+
+    Extracts all predefined fields (UPI IDs, phone numbers, URLs, bank
+    accounts, IFSC codes, names, emails, case IDs, policy numbers, order
+    numbers) PLUS any other information the scammer provides via a
+    free-form 'additionalIntel' dict whose keys are decided by the LLM.
     """
     _empty = {
         "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
         "bankAccounts": [], "ifscCodes": [],
         "names": [], "emails": [],
         "caseIds": [], "policyNumbers": [], "orderNumbers": [],
+        "additionalIntel": {},
     }
     # Check if LLM is available (API keys set)
     if not (os.getenv("OPENAI_API_KEY") or os.getenv("GROQ_API_KEY")):
@@ -192,28 +197,45 @@ def extract_intel_with_llm(text: str, history: List) -> Dict[str, List[str]]:
         client, model, label = provider_info
         
         # Build extraction prompt
-        system_prompt = """You are an intelligence extraction assistant. Extract the following from the given text:
-1. UPI IDs (format: xyz@bank)
-2. Phone numbers (10-12 digits, any format)
-3. URLs/Links — ONLY actual web URLs (http, https, www, hxxp, or domain[.]tld format). Do NOT include UPI IDs (user@bank) or email addresses here.
-4. Bank account numbers (8-16 digits)
-5. Names — ONLY actual human person names (first name, last name, or full name). Examples: "Rajesh Kumar", "Priya", "Sharma".
-   Do NOT include: titles alone ("Officer", "Inspector"), organization names ("Amazon", "SBI"), roles ("customer support"), or generic words.
-   If a title accompanies a person name, include only the person name part (e.g. "Officer Vikram Singh" → extract "Vikram Singh").
-6. Emails — standard email addresses
-7. Case IDs / Reference numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024)
-8. Policy numbers (e.g. POL-123456, LIC12345678)
-9. Order numbers (e.g. ORD-12345, AWB1234567890)
-10. IFSC codes — Indian bank branch codes (format: 4 uppercase letters + 0 + 6 alphanumeric chars, e.g. SBIN0001234, HDFC0000123). Extract ONLY valid IFSC codes.
+        system_prompt = """You are an intelligence extraction assistant for a honeypot system. \
+Your job is to extract EVERY piece of useful information from scammer messages — both the \
+standard predefined fields AND any other information the scammer provides.
 
-Return ONLY valid JSON with these exact keys: upiIds, phoneNumbers, phishingLinks, bankAccounts, ifscCodes, names, emails, caseIds, policyNumbers, orderNumbers.
-Each should be an array of strings. Extract ALL instances, even if obfuscated or split.
-IMPORTANT for names: Only extract strings that are clearly human person names. If no person name is mentioned, return an empty array for names. Do NOT guess or infer names from context.
+Extract these PREDEFINED fields:
+1. upiIds — UPI payment IDs (format: xyz@bank). Examples: scam@paytm, fraud@ybl.
+2. phoneNumbers — phone numbers, 10-12 digits, any format (spaced, dashed, words).
+3. phishingLinks — ONLY actual web URLs (http/https/www/hxxp or domain[.]tld). Do NOT put UPI IDs or email addresses here.
+4. bankAccounts — bank account numbers, 8-16 digits.
+5. ifscCodes — Indian bank branch codes: 4 uppercase letters + 0 + 6 alphanumeric chars. e.g. SBIN0001234.
+6. names — ONLY actual human person names (e.g. "Rajesh Kumar", "Priya Sharma"). Do NOT include titles alone, org names, or roles.
+   If a title accompanies a name, extract only the name part ("Officer Vikram Singh" → "Vikram Singh").
+7. emails — standard email addresses (user@domain.tld).
+8. caseIds — case/reference/FIR/complaint numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024).
+9. policyNumbers — insurance/policy numbers (e.g. POL-123456, LIC12345678).
+10. orderNumbers — order/shipment/tracking numbers (e.g. ORD-12345, AWB1234567890).
+
+AND extract ALL OTHER useful information into the "additionalIntel" object:
+- Use descriptive snake_case keys for each type of information you find.
+- Examples of what to capture: organization_names, locations, amounts, dates, \
+department_names, job_titles, threat_descriptions, promised_actions, website_names, \
+app_names, government_scheme_names, loan_details, prize_details, invoice_numbers, \
+customer_ids, employee_ids, vehicle_numbers, aadhaar_hints, pan_hints, etc.
+- Each key's value must be an array of strings.
+- If nothing extra is found, set "additionalIntel" to {}.
+
+Return ONLY valid JSON with exactly these keys:
+upiIds, phoneNumbers, phishingLinks, bankAccounts, ifscCodes, names, emails, caseIds, policyNumbers, orderNumbers, additionalIntel.
+All list fields must be arrays of strings. Extract ALL instances, even if obfuscated.
 
 Example:
-{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], "phishingLinks": ["http://fake-bank.com"], "bankAccounts": ["1234567890123456"], "ifscCodes": ["SBIN0001234"], "names": ["Rajesh Kumar"], "emails": [], "caseIds": ["REF-20230001"], "policyNumbers": [], "orderNumbers": []}"""  
-        
-        user_prompt = f"Extract intelligence from this scammer message:\n\n{text}\n\nReturn JSON only."
+{"upiIds": ["scam@paytm"], "phoneNumbers": ["9876543210"], \
+"phishingLinks": ["http://fake-bank.com"], "bankAccounts": ["1234567890123456"], \
+"ifscCodes": ["SBIN0001234"], "names": ["Rajesh Kumar"], "emails": ["fraud@icicilimited.com"], \
+"caseIds": ["REF-20230001"], "policyNumbers": [], "orderNumbers": [], \
+"additionalIntel": {"organization_names": ["ICICI Bank"], "amounts": ["50000"], \
+"locations": ["Mumbai"], "threats": ["account will be blocked in 2 hours"]}}"""
+
+        user_prompt = f"Extract ALL intelligence from this scammer message:\n\n{text}\n\nReturn JSON only."
         
         # Call LLM directly with the extraction prompt
         response = client.chat.completions.create(
@@ -237,21 +259,33 @@ Example:
         result = json.loads(content)
         
         if result and isinstance(result, dict):
-            # Add source indicator
             result["source"] = "llm"
-            # Ensure all expected keys exist and values are lists
+            # Ensure all predefined list fields exist
             for k in _empty:
+                if k == "additionalIntel":
+                    continue
                 if k not in result or not isinstance(result[k], list):
                     result[k] = []
+            # Ensure additionalIntel is a dict
+            if not isinstance(result.get("additionalIntel"), dict):
+                result["additionalIntel"] = {}
+            # Normalize values inside additionalIntel — each must be a list of strings
+            for k, v in list(result["additionalIntel"].items()):
+                if isinstance(v, str):
+                    result["additionalIntel"][k] = [v]
+                elif not isinstance(v, list):
+                    result["additionalIntel"][k] = [str(v)]
+                else:
+                    result["additionalIntel"][k] = [str(i) for i in v if i]
             return result
         else:
             return {**_empty, "source": "llm_error"}
     
     except json.JSONDecodeError as e:
-        print(f"⚠️  LLM extraction returned invalid JSON: {e}")
+        print(f"\u26a0\ufe0f  LLM extraction returned invalid JSON: {e}")
         return {**_empty, "source": "llm_error"}
     except Exception as e:
-        print(f"⚠️  LLM extraction failed ({type(e).__name__}): {e}")
+        print(f"\u26a0\ufe0f  LLM extraction failed ({type(e).__name__}): {e}")
         return {**_empty, "source": "llm_error"}
 
 
@@ -312,6 +346,7 @@ def merge_and_deduplicate(
         "caseIds": [],
         "policyNumbers": [],
         "orderNumbers": [],
+        "additionalIntel": {},
     }
     
     # Merge UPI IDs (case-insensitive dedup)
@@ -433,6 +468,21 @@ def merge_and_deduplicate(
         return False
 
     merged["phishingLinks"] = [u for u in merged["phishingLinks"] if not _link_is_at_domain(u)]
+
+    # ── Merge additionalIntel (open-ended free-form dict) ─────
+    # Only the LLM produces additionalIntel.  Merge by key, deduplicating
+    # values within each key across all three sources.
+    for source in [regex_results, advanced_results, llm_results]:
+        for key, values in source.get("additionalIntel", {}).items():
+            if not isinstance(values, list):
+                continue
+            existing = merged["additionalIntel"].setdefault(key, [])
+            seen = set(v.strip().lower() for v in existing)
+            for val in values:
+                val_str = str(val).strip()
+                if val_str and val_str.lower() not in seen:
+                    seen.add(val_str.lower())
+                    existing.append(val_str)
 
     return merged
 
@@ -600,31 +650,12 @@ def extract_intel(session, text):
     # This avoids an unnecessary network call on every short numeric message.
     # ═══════════════════════════════════════════════════════════
 
-    _regex_found_any = any([
-        regex_results["upiIds"],
-        regex_results["phoneNumbers"],
-        regex_results["phishingLinks"],
-        regex_results["bankAccounts"],
-        regex_results["emails"],
-        regex_results["caseIds"],
-        regex_results["policyNumbers"],
-        regex_results["orderNumbers"],
-        advanced_results["phoneNumbers"],
-        advanced_results["phishingLinks"],
-    ])
-    _msg_may_have_name = len(text_clean) > 15
-
-    # Skip LLM extraction only when regex already captured everything AND
-    # the message is short enough that a name is unlikely.
-    _run_llm_extraction = (not _regex_found_any) or _msg_may_have_name
-
+    # LLM extraction always runs — it is the primary extraction method.
+    # It captures both the predefined structured fields AND any free-form
+    # additional intel (org names, amounts, dates, threats, etc.) via
+    # the open-ended 'additionalIntel' dict.
     history = session.get("history", [])
-    llm_results = extract_intel_with_llm(text, history) if _run_llm_extraction else {
-        "upiIds": [], "phoneNumbers": [], "phishingLinks": [],
-        "bankAccounts": [], "ifscCodes": [], "names": [], "emails": [],
-        "caseIds": [], "policyNumbers": [], "orderNumbers": [],
-        "source": "skipped",
-    }
+    llm_results = extract_intel_with_llm(text, history)
     
     # ═══════════════════════════════════════════════════════════
     # STEP 4: MERGE & DEDUPLICATE
@@ -717,6 +748,16 @@ def extract_intel(session, text):
         if ifsc not in session["intel"].get("ifscCodes", []):
             session["intel"].setdefault("ifscCodes", []).append(ifsc)
 
+    # Add additionalIntel (merge per-key into session, deduplicating values)
+    session_extra = session["intel"].setdefault("additionalIntel", {})
+    for key, values in merged.get("additionalIntel", {}).items():
+        existing = session_extra.setdefault(key, [])
+        seen = set(v.strip().lower() for v in existing)
+        for val in values:
+            if val.strip().lower() not in seen:
+                seen.add(val.strip().lower())
+                existing.append(val)
+
     # Track telemetry
     if new_counts["upi"] > 0:
         track_intelligence("upi", new_counts["upi"])
@@ -771,13 +812,18 @@ def calculate_intel_score(session: dict) -> dict:
     messages = len(history)
     
     # ── 1. Unique Artifacts Score (0-1) ────────────────────────
-    # Count unique intelligence items across all types
+    # Count unique intelligence items across all types (including additionalIntel)
+    additional_count = sum(
+        len(v) for v in intel.get("additionalIntel", {}).values()
+        if isinstance(v, list)
+    )
     unique_count = (
         len(intel.get("upiIds", [])) +
         len(intel.get("phoneNumbers", [])) +
         len(intel.get("phishingLinks", [])) +
         len(intel.get("bankAccounts", [])) +
         len(intel.get("names", [])) +
+        min(additional_count, 3) +  # cap additional to avoid inflating score
         len(intel.get("emails", [])) +
         len(intel.get("caseIds", [])) +
         len(intel.get("policyNumbers", [])) +
@@ -919,8 +965,10 @@ def detect_scammer_patterns(session: dict) -> dict:
         recent_lengths = [len(msg.get("text", "")) for msg in scammer_messages[-2:]]
         avg_length = sum(recent_lengths) / len(recent_lengths)
         
-        # Very short responses (<30 chars) suggest giving up
-        if avg_length < 30:
+        # Very short responses (<15 chars) suggest giving up
+        # Threshold is 15 (not 30) because scammers naturally send short
+        # messages like "okay", "yes, send" — that is normal engagement.
+        if avg_length < 15:
             patterns["disengagement"] = True
             patterns["severity"] += 0.4
     

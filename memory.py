@@ -51,6 +51,7 @@ def get_session(session_id: str, history: list = None):
             "caseIds": [],
             "policyNumbers": [],
             "orderNumbers": [],
+            "additionalIntel": {},
         },
         "dialogue_state": ConversationState.INIT,
         "state_turn_count": 0,

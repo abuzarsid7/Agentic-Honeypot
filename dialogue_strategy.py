@@ -466,21 +466,16 @@ def get_next_state(
         return ConversationState.CLOSE
 
     # ── Stagnation close: no new intel for 3+ consecutive turns ─
-    # After minimum engagement (10 msgs) end the conversation if the
-    # scammer has stopped providing any new information.
-    if total_messages >= 10:
-        if patterns["stale_intel"] and (
-            patterns["disengagement"]
-            or components["artifacts"] >= 0.25
-            or intel_score >= 0.35
-        ):
+    # Only close after substantial engagement (15+ msgs) AND the scammer
+    # has both disengaged AND we already have meaningful intel (>=60%).
+    if total_messages >= 15:
+        if patterns["stale_intel"] and patterns["disengagement"] and components["artifacts"] >= 0.60:
             session["conversation_ended"] = True
             return ConversationState.CLOSE
 
     # ── Early-close: all relevant fields already collected ───────
-    # Once the agent has extracted every piece of intel that matters
-    # for this scam type there is no point continuing (min 12 turns).
-    if total_messages >= 12:
+    # Only exit early after 20+ turns to ensure maximum engagement.
+    if total_messages >= 20:
         scam_type_key = session.get("scam_type", "unknown")
         relevant = _get_relevant_fields(scam_type_key)
         all_collected = all(intel.get(f) for f in relevant)
@@ -546,32 +541,33 @@ def get_next_state(
     elif current_state == ConversationState.ESCALATE_EXTRACTION:
         # ── Intelligent closing logic using intel_score ──
 
-        # Minimum engagement: keep talking for at least 5 messages
-        if total_messages < 5:
+        # Minimum engagement: keep talking for at least 15 messages
+        if total_messages < 15:
             return ConversationState.ESCALATE_EXTRACTION
 
-        # Pattern 1: Scammer disengaged → close
-        if patterns["disengagement"]:
+        # Pattern 1: Scammer disengaged + substantial intel already collected
+        # Disengagement alone is not enough — scammers often give short replies
+        if patterns["disengagement"] and components["artifacts"] >= 0.65:
             return ConversationState.CLOSE
 
-        # Pattern 3: Stale intel (no new intel in last 3 turns) + decent extraction → close
-        if patterns["stale_intel"] and components["artifacts"] >= 0.4:
+        # Pattern 3: Stale intel + strong extraction (don't quit if we still have gaps)
+        if patterns["stale_intel"] and components["artifacts"] >= 0.65:
             return ConversationState.CLOSE
 
-        # Pattern 4: High quality extraction complete (intel_score > 0.75)
-        if intel_score >= 0.75:
+        # Pattern 4: Very high quality extraction complete
+        if intel_score >= 0.85:
             return ConversationState.CLOSE
 
-        # Pattern 5: Good extraction + diminishing novelty
-        if components["artifacts"] >= 0.6 and components["novelty"] < 0.3:
+        # Pattern 5: Good extraction + truly diminishing novelty for a while
+        if components["artifacts"] >= 0.75 and components["novelty"] < 0.15:
             return ConversationState.CLOSE
 
-        # Pattern 6: Multiple warning signs
-        if patterns["severity"] >= 0.7:
+        # Pattern 6: Multiple strong warning signs
+        if patterns["severity"] >= 0.85:
             return ConversationState.CLOSE
 
-        # Pattern 8: Traditional check - has phone + payment/link, exceeded turns
-        if has_phone and (has_upi or has_urls) and exceeded_turns:
+        # Pattern 8: Has key intel + exceeded turns + deep enough in conversation
+        if has_phone and (has_upi or has_urls) and exceeded_turns and total_messages >= 18:
             return ConversationState.CLOSE
 
         # Continue extracting

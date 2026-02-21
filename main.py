@@ -127,14 +127,17 @@ def get_session_details(session_id: str, x_api_key: str = Header(None)):
 
 @app.post("/honeypot")
 def honeypot(payload: dict, x_api_key: str = Header(None)):
+    # Resolve session_id immediately — before any try/except — so it is
+    # always available in error handlers and every response path.
+    session_id = payload.get("sessionId") or str(uuid.uuid4())
+
     try:
-        # � Track request with automatic timing
+        # Track request with automatic timing
         with track_request():
             # 🔐 API key validation
             if x_api_key != API_KEY:
                 raise HTTPException(status_code=401, detail="Invalid API key")
 
-            session_id = payload.get("sessionId") or str(uuid.uuid4())
             message = payload["message"]
             history = payload.get("conversationHistory", [])
 
@@ -244,7 +247,7 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
         # 🚨 SAFETY NET: never return empty response
         return {
             "status": "error",
-            "sessionId": payload.get("sessionId", ""),
+            "sessionId": session_id,
             "reply": "Temporary issue, please retry"
         }
 
