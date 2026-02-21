@@ -595,12 +595,25 @@ def extract_intel(session, text):
     # The LLM has semantic understanding to distinguish "I am Rajesh" (name)
     # from "I am calling" (not a name).
 
-    # Extract case IDs / reference numbers (e.g. CASE-12345, REF-20230001, FIR/123/2024, CRN12345678)
+    # Extract case IDs / reference numbers
+    # Pattern 1: known prefix codes (CASE-12345, REF-20230001, FIR/123/2024, CRN12345678)
     case_patterns = re.findall(
         r'\b(?:CASE|REF|FIR|CRN|COMP|CR|TKT|INC|SR|TICKET)[\s\-/#]?\d{3,15}(?:/\d{2,4})?\b',
         text_clean, re.IGNORECASE
     )
-    regex_results["caseIds"] = [c.strip() for c in case_patterns]
+    # Pattern 2: org-year-state-number format (e.g. CBI-2026-MH-44821, ED-2025-DL-001)
+    case_patterns += re.findall(
+        r'\b[A-Z]{2,6}[-/]\d{4}[-/][A-Z]{2,5}[-/]\d{3,10}\b',
+        text_clean, re.IGNORECASE
+    )
+    # Pattern 3: contextual — ID/number/code following a case/reference keyword
+    case_patterns += re.findall(
+        r'(?:case\s*(?:id|number|no)|reference\s*(?:id|number|no|#)?|complaint\s*(?:id|number|no)|'
+        r'ticket\s*(?:id|number|no)|report\s*(?:number|no)|fir\s*(?:number|no))[\s:.,#-]*'
+        r'([A-Z0-9][A-Z0-9\-/]{3,24})',
+        text_clean, re.IGNORECASE
+    )
+    regex_results["caseIds"] = list({c.strip() for c in case_patterns if c.strip()})
 
     # Extract policy numbers (e.g. POL-123456, POLICY/2024/1234, LIC12345678)
     policy_patterns = re.findall(

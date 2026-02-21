@@ -40,10 +40,11 @@ def agent_reply(session_id, session, scammer_text, known_scam_type: str = None):
     # 1. Extract intelligence
     extract_intel(session, scammer_text)
     
-    # 1b. Detect scam type — skip if already provided by caller
+    # 1b. Detect scam type — use caller-provided type if available;
+    # only fire a separate LLM call when genuinely unknown (saves one API round-trip).
     if known_scam_type and known_scam_type != "unknown":
         session["scam_type"] = known_scam_type
-    elif session.get("scam_type", "unknown") == "unknown" or session.get("messages", 0) < 5:
+    elif session.get("scam_type", "unknown") == "unknown":
         try:
             history = session.get("history", [])
             analysis = analyze_message(scammer_text, history)
