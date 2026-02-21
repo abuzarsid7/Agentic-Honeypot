@@ -11,6 +11,7 @@ from defense import is_bot_accusation_detected
 import os
 import re
 import time
+import uuid
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -133,26 +134,24 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
             if x_api_key != API_KEY:
                 raise HTTPException(status_code=401, detail="Invalid API key")
 
-            session_id = payload["sessionId"]
+            session_id = payload.get("sessionId") or str(uuid.uuid4())
             message = payload["message"]
             history = payload.get("conversationHistory", [])
 
             session = get_session(session_id, history)
 
             # ── Guard: refuse to reply once conversation has formally ended ──
-            if session.get("conversation_ended") or session.get("messages", 0) >= 9:
+            if session.get("conversation_ended"):
                 intel = session.get("intel", {})
                 return {
                     "status": "ended",
                     "sessionId": session_id,
                     "scamDetected": True,
                     "extractedIntelligence": intel,
-                    "engagementMetrics": {
-                        "engagementDurationSeconds": round(
-                            time.time() - session.get("start_time", time.time()), 1
-                        ),
-                        "totalMessagesExchanged": session.get("messages", 0),
-                    },
+                    "engagementDurationSeconds": round(
+                        time.time() - session.get("start_time", time.time()), 1
+                    ),
+                    "totalMessagesExchanged": session.get("messages", 0),
                     "agentNotes": "Conversation ended — maximum exchanges reached or all intel collected.",
                     "scamType": session.get("scam_type", "unknown"),
                     "confidenceLevel": 1.0,
@@ -224,11 +223,10 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
                 "sessionId": session_id,
                 "scamDetected": bool(scam_detected or is_bot_accusation),
                 "extractedIntelligence": intel,
+                # ── Engagement metrics at top level ──
+                "engagementDurationSeconds": duration_secs,
+                "totalMessagesExchanged": total_messages,
                 # ── Optional fields (rubric) ──
-                "engagementMetrics": {
-                    "engagementDurationSeconds": duration_secs,
-                    "totalMessagesExchanged": total_messages,
-                },
                 "agentNotes": agent_notes,
                 "scamType": scam_type,
                 "confidenceLevel": confidence_score,
@@ -246,6 +244,7 @@ def honeypot(payload: dict, x_api_key: str = Header(None)):
         # 🚨 SAFETY NET: never return empty response
         return {
             "status": "error",
+            "sessionId": payload.get("sessionId", ""),
             "reply": "Temporary issue, please retry"
         }
 

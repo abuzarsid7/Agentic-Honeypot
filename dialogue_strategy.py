@@ -243,7 +243,7 @@ STATE_CONFIG = {
             "What is your employee ID? And what department do you work in?",
             "I need to note this down. What is the official case number you are referring to?",
         ],
-        "max_turns": 1,
+        "max_turns": 2,
     },
     
     ConversationState.PROBE_REASON: {
@@ -259,7 +259,7 @@ STATE_CONFIG = {
             "Is there a complaint number or FIR number I should know about?",
             "Which policy or order number is this related to? I have several.",
         ],
-        "max_turns": 2,
+        "max_turns": 5,
     },
     
     ConversationState.PROBE_PAYMENT: {
@@ -277,7 +277,7 @@ STATE_CONFIG = {
             "Can you also give me your phone number in case the payment fails?",
             "What receipt or reference number will I get after the payment?",
         ],
-        "max_turns": 3,
+        "max_turns": 6,
     },
     
     ConversationState.PROBE_LINK: {
@@ -295,7 +295,7 @@ STATE_CONFIG = {
             "Can you share your email ID so I can write to you if the link doesn't work?",
             "What is the full website address? And what is the customer support number on it?",
         ],
-        "max_turns": 2,
+        "max_turns": 5,
     },
     
     ConversationState.STALL: {
@@ -313,7 +313,7 @@ STATE_CONFIG = {
             "Can you share the complaint number or ticket ID so I can track this?",
             "What is your supervisor's name and direct number? I want to verify with them.",
         ],
-        "max_turns": 1,
+        "max_turns": 4,
     },
     
     ConversationState.CONFIRM_DETAILS: {
@@ -331,7 +331,7 @@ STATE_CONFIG = {
             "My son is asking for the insurance or policy number. What is it?",
             "What is the official reference ID I should keep for this entire process?",
         ],
-        "max_turns": 1,
+        "max_turns": 4,
     },
     
     ConversationState.ESCALATE_EXTRACTION: {
@@ -349,7 +349,7 @@ STATE_CONFIG = {
             "Can you give me an alternate phone number to reach your department?",
             "What is the tracking number or order ID I should use to check status?",
         ],
-        "max_turns": 3,
+        "max_turns": 6,
     },
     
     ConversationState.CLOSE: {
@@ -367,7 +367,7 @@ STATE_CONFIG = {
             "What is the order number or policy number for my records?",
             "Alright. What is the toll-free number and the case ID I should keep?",
         ],
-        "max_turns": 1,
+        "max_turns": 2,
     },
 }
 
@@ -458,18 +458,29 @@ def get_next_state(
     
     total_messages = session.get("messages", 0)
 
-    # ── Hard global cap: reply 9 is the last one ────────────────
-    # On the 9th message the agent sends a closing reply and sets the
-    # conversation_ended flag.  /honeypot checks this flag at the top
-    # of every request and refuses to reply a 10th time.
-    if total_messages >= 9:
+    # ── Absolute hard cap (prevent truly infinite sessions) ─────
+    # 30 messages is the safety ceiling; should_close_conversation
+    # in intelligence.py also enforces this independently.
+    if total_messages >= 30:
         session["conversation_ended"] = True
         return ConversationState.CLOSE
 
+    # ── Stagnation close: no new intel for 3+ consecutive turns ─
+    # After minimum engagement (10 msgs) end the conversation if the
+    # scammer has stopped providing any new information.
+    if total_messages >= 10:
+        if patterns["stale_intel"] and (
+            patterns["disengagement"]
+            or components["artifacts"] >= 0.25
+            or intel_score >= 0.35
+        ):
+            session["conversation_ended"] = True
+            return ConversationState.CLOSE
+
     # ── Early-close: all relevant fields already collected ───────
     # Once the agent has extracted every piece of intel that matters
-    # for this scam type there is no point continuing (min 5 turns).
-    if total_messages >= 5:
+    # for this scam type there is no point continuing (min 12 turns).
+    if total_messages >= 12:
         scam_type_key = session.get("scam_type", "unknown")
         relevant = _get_relevant_fields(scam_type_key)
         all_collected = all(intel.get(f) for f in relevant)
